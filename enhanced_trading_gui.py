@@ -729,26 +729,42 @@ class EnhancedTradingGUI:
         direction = np.random.choice([1, -1])
         entry_price = self.current_price
         
-        # Scalping stop loss and take profit - much tighter levels
-        timeframe_str = self.timeframe_var.get()
+        # Calculate stop loss based on last 10 candles (including signal candle)
+        if len(self.ohlc_data) >= 10:
+            last_10_candles = list(self.ohlc_data)[-10:]  # Last 10 candles including current
+            
+            if direction == 1:  # Buy trade
+                # SL = Low of last 10 candles
+                stop_loss = min(candle['low'] for candle in last_10_candles)
+            else:  # Sell trade
+                # SL = High of last 10 candles
+                stop_loss = max(candle['high'] for candle in last_10_candles)
+        else:
+            # Fallback if not enough candles - use percentage-based SL
+            timeframe_str = self.timeframe_var.get()
+            if timeframe_str == "M1":
+                stop_loss_distance = entry_price * 0.001
+            elif timeframe_str == "M5":
+                stop_loss_distance = entry_price * 0.002
+            elif timeframe_str == "M15":
+                stop_loss_distance = entry_price * 0.003
+            elif timeframe_str == "M30":
+                stop_loss_distance = entry_price * 0.004
+            else:  # H1
+                stop_loss_distance = entry_price * 0.005
+            
+            if direction == 1:
+                stop_loss = entry_price - stop_loss_distance
+            else:
+                stop_loss = entry_price + stop_loss_distance
         
-        # Adjust SL/TP based on timeframe for scalping
-        if timeframe_str == "M1":
-            stop_loss_distance = entry_price * 0.001  # 0.1% for M1 scalping
-        elif timeframe_str == "M5":
-            stop_loss_distance = entry_price * 0.002  # 0.2% for M5 scalping
-        elif timeframe_str == "M15":
-            stop_loss_distance = entry_price * 0.003  # 0.3% for M15
-        elif timeframe_str == "M30":
-            stop_loss_distance = entry_price * 0.004  # 0.4% for M30
-        else:  # H1
-            stop_loss_distance = entry_price * 0.005  # 0.5% for H1
+        # Calculate stop loss distance for TP calculation
+        stop_loss_distance = abs(entry_price - stop_loss)
         
+        # Calculate take profit with 1:1.5 risk-reward ratio
         if direction == 1:  # Buy
-            stop_loss = entry_price - stop_loss_distance
             take_profit = entry_price + stop_loss_distance * 1.5  # 1:1.5 RR
         else:  # Sell
-            stop_loss = entry_price + stop_loss_distance
             take_profit = entry_price - stop_loss_distance * 1.5
         
         # Calculate position size
@@ -771,9 +787,10 @@ class EnhancedTradingGUI:
         self.play_sound('trade_open')
         self.add_particle_effect(entry_price, direction)
         
-        print(f"🧪 Scalping Trade ({timeframe_str}): {'BUY' if direction == 1 else 'SELL'} at {entry_price:.2f}")
-        print(f"   SL: {stop_loss:.2f} | TP: {take_profit:.2f} | Distance: {stop_loss_distance:.2f}")
-        print(f"   Lot: {lot_size} | Risk: ${risk_amount:.2f} | Total positions: {len(self.positions)}")
+        timeframe_str = self.timeframe_var.get()
+        print(f"🧪 Trade ({timeframe_str}): {'BUY' if direction == 1 else 'SELL'} at {entry_price:.2f}")
+        print(f"   SL: {stop_loss:.2f} (10-candle {'low' if direction == 1 else 'high'}) | TP: {take_profit:.2f} | Distance: {stop_loss_distance:.2f}")
+        print(f"   Lot: {lot_size} | Risk: ${risk_amount:.2f} | RR: 1:1.5 | Total positions: {len(self.positions)}")
 
     def generate_simplified_signal_from_ohlc(self):
         """Generate simplified trading signal from OHLC data"""
@@ -840,26 +857,42 @@ class EnhancedTradingGUI:
     
     def execute_simple_trade(self, direction, entry_price):
         """Execute a simple trade with proper risk management"""
-        # Scalping stop loss based on timeframe
-        timeframe_str = self.timeframe_var.get()
+        # Calculate stop loss based on last 10 candles (including signal candle)
+        if len(self.ohlc_data) >= 10:
+            last_10_candles = list(self.ohlc_data)[-10:]  # Last 10 candles including current
+            
+            if direction == 1:  # Buy trade
+                # SL = Low of last 10 candles
+                stop_loss = min(candle['low'] for candle in last_10_candles)
+            else:  # Sell trade
+                # SL = High of last 10 candles
+                stop_loss = max(candle['high'] for candle in last_10_candles)
+        else:
+            # Fallback if not enough candles - use percentage-based SL
+            timeframe_str = self.timeframe_var.get()
+            if timeframe_str == "M1":
+                stop_loss_distance = entry_price * 0.001
+            elif timeframe_str == "M5":
+                stop_loss_distance = entry_price * 0.002
+            elif timeframe_str == "M15":
+                stop_loss_distance = entry_price * 0.003
+            elif timeframe_str == "M30":
+                stop_loss_distance = entry_price * 0.004
+            else:  # H1
+                stop_loss_distance = entry_price * 0.005
+            
+            if direction == 1:
+                stop_loss = entry_price - stop_loss_distance
+            else:
+                stop_loss = entry_price + stop_loss_distance
         
-        # Tight scalping levels based on timeframe
-        if timeframe_str == "M1":
-            stop_loss_distance = entry_price * 0.001  # 0.1% for M1 scalping
-        elif timeframe_str == "M5":
-            stop_loss_distance = entry_price * 0.002  # 0.2% for M5 scalping
-        elif timeframe_str == "M15":
-            stop_loss_distance = entry_price * 0.003  # 0.3% for M15
-        elif timeframe_str == "M30":
-            stop_loss_distance = entry_price * 0.004  # 0.4% for M30
-        else:  # H1
-            stop_loss_distance = entry_price * 0.005  # 0.5% for H1
+        # Calculate stop loss distance for TP calculation
+        stop_loss_distance = abs(entry_price - stop_loss)
         
+        # Calculate take profit with 1:1.5 risk-reward ratio
         if direction == 1:  # Buy
-            stop_loss = entry_price - stop_loss_distance
             take_profit = entry_price + stop_loss_distance * 1.5  # 1:1.5 RR
         else:  # Sell
-            stop_loss = entry_price + stop_loss_distance
             take_profit = entry_price - stop_loss_distance * 1.5
         
         # Calculate position size using proper lot sizing
@@ -884,32 +917,44 @@ class EnhancedTradingGUI:
         self.add_particle_effect(entry_price, direction)
         
         timeframe_str = self.timeframe_var.get()
-        print(f"🎯 Scalping Trade ({timeframe_str}): {'BUY' if direction == 1 else 'SELL'} at {entry_price:.2f}")
-        print(f"   SL: {stop_loss:.2f} | TP: {take_profit:.2f} | Distance: {stop_loss_distance:.2f}")
-        print(f"   Risk: ${risk_amount:.2f} | Lot: {lot_size} | Total positions: {len(self.positions)}")
+        print(f"🎯 Trade ({timeframe_str}): {'BUY' if direction == 1 else 'SELL'} at {entry_price:.2f}")
+        print(f"   SL: {stop_loss:.2f} (10-candle {'low' if direction == 1 else 'high'}) | TP: {take_profit:.2f} | Distance: {stop_loss_distance:.2f}")
+        print(f"   Risk: ${risk_amount:.2f} | Lot: {lot_size} | RR: 1:1.5 | Total positions: {len(self.positions)}")
     
     def execute_hmm_trade(self, signal):
         """Execute trade from real HMM strategy signal"""
         direction = signal['signal']
         entry_price = self.current_price
         
-        # Use signal's stop loss and take profit
-        if 'stop_loss_pips' in signal and 'take_profit_pips' in signal:
-            pip_value = 0.0001 if 'JPY' not in self.trading_symbol else 0.01
-            stop_loss = entry_price - (signal['stop_loss_pips'] * pip_value * direction)
-            take_profit = entry_price + (signal['take_profit_pips'] * pip_value * direction)
+        # Calculate stop loss based on last 10 candles (including signal candle)
+        if len(self.ohlc_data) >= 10:
+            last_10_candles = list(self.ohlc_data)[-10:]  # Last 10 candles including current
+            
+            if direction == 1:  # Buy trade
+                # SL = Low of last 10 candles
+                stop_loss = min(candle['low'] for candle in last_10_candles)
+            else:  # Sell trade
+                # SL = High of last 10 candles
+                stop_loss = max(candle['high'] for candle in last_10_candles)
         else:
-            # Fallback to ATR-based levels
+            # Fallback to ATR-based levels if not enough candles
             recent_prices = [bar['close'] for bar in list(self.ohlc_data)[-20:]]
             atr = np.std(recent_prices) if len(recent_prices) >= 20 else entry_price * 0.02
             
             stop_loss_distance = atr * 1.5
             if direction == 1:
                 stop_loss = entry_price - stop_loss_distance
-                take_profit = entry_price + stop_loss_distance * 1.5
             else:
                 stop_loss = entry_price + stop_loss_distance
-                take_profit = entry_price - stop_loss_distance * 1.5
+        
+        # Calculate stop loss distance for TP calculation
+        stop_loss_distance = abs(entry_price - stop_loss)
+        
+        # Calculate take profit with 1:1.5 risk-reward ratio
+        if direction == 1:  # Buy
+            take_profit = entry_price + stop_loss_distance * 1.5  # 1:1.5 RR
+        else:  # Sell
+            take_profit = entry_price - stop_loss_distance * 1.5
         
         # Calculate position size using proper lot sizing
         risk_amount = self.capital * (self.risk_per_trade / 100)
@@ -933,7 +978,8 @@ class EnhancedTradingGUI:
         self.add_particle_effect(entry_price, direction)
         
         print(f"🧠 HMM Strategy Trade: {'BUY' if direction == 1 else 'SELL'} at {entry_price:.5f}")
-        print(f"   SL: {stop_loss:.5f} | TP: {take_profit:.5f} | Risk: ${risk_amount:.2f} | Lot: {lot_size}")
+        print(f"   SL: {stop_loss:.5f} (10-candle {'low' if direction == 1 else 'high'}) | TP: {take_profit:.5f} | RR: 1:1.5")
+        print(f"   Risk: ${risk_amount:.2f} | Lot: {lot_size} | Distance: {stop_loss_distance:.5f}")
     
     def generate_trade_signal(self):
         """Generate a trading signal using strategy logic"""
@@ -951,17 +997,35 @@ class EnhancedTradingGUI:
             direction = np.random.choice([1, -1])
             entry_price = self.current_price
             
-            # Calculate stop loss and take profit based on recent volatility
-            recent_prices = [bar['close'] for bar in list(self.ohlc_data)[-20:]]
-            atr = np.std(recent_prices) if len(recent_prices) >= 20 else 100
+            # Calculate stop loss based on last 10 candles (including signal candle)
+            if len(self.ohlc_data) >= 10:
+                last_10_candles = list(self.ohlc_data)[-10:]  # Last 10 candles including current
+                
+                if direction == 1:  # Buy trade
+                    # SL = Low of last 10 candles
+                    stop_loss = min(candle['low'] for candle in last_10_candles)
+                else:  # Sell trade
+                    # SL = High of last 10 candles
+                    stop_loss = max(candle['high'] for candle in last_10_candles)
+            else:
+                # Fallback to ATR-based levels if not enough candles
+                recent_prices = [bar['close'] for bar in list(self.ohlc_data)[-20:]]
+                atr = np.std(recent_prices) if len(recent_prices) >= 20 else 100
+                
+                stop_loss_distance = atr * 1.5
+                
+                if direction == 1:  # Buy
+                    stop_loss = entry_price - stop_loss_distance
+                else:  # Sell
+                    stop_loss = entry_price + stop_loss_distance
             
-            stop_loss_distance = atr * 1.5
+            # Calculate stop loss distance for TP calculation
+            stop_loss_distance = abs(entry_price - stop_loss)
             
+            # Calculate take profit with 1:1.5 risk-reward ratio
             if direction == 1:  # Buy
-                stop_loss = entry_price - stop_loss_distance
                 take_profit = entry_price + stop_loss_distance * 1.5
             else:  # Sell
-                stop_loss = entry_price + stop_loss_distance
                 take_profit = entry_price - stop_loss_distance * 1.5
             
             # Calculate position size using proper lot sizing
