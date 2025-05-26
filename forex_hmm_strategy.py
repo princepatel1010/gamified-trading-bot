@@ -204,13 +204,33 @@ class ForexHMMStrategy:
         df['tokyo_session'] = ((df['hour'] >= 0) & (df['hour'] < 8)).astype(int)
         df['overlap_session'] = ((df['hour'] >= 13) & (df['hour'] < 16)).astype(int)
         
-        # Select features for HMM
-        feature_columns = [
-            'returns', 'log_returns', 'price_change', 'high_low_ratio',
-            'rsi', 'macd', 'bb_width', 'price_sma5_ratio', 'price_sma10_ratio',
-            'atr', 'volatility', 'momentum', 'roc', 'volume_ratio',
+        # Select features for HMM - use robust feature set
+        # Start with essential features that are less likely to cause convergence issues
+        essential_features = [
+            'returns', 'log_returns', 'price_change', 
+            'rsi', 'price_sma5_ratio', 'price_sma10_ratio',
+            'atr', 'volatility', 'momentum'
+        ]
+        
+        # Add additional features if data quality is good
+        additional_features = [
+            'high_low_ratio', 'macd', 'bb_width', 'roc', 'volume_ratio',
             'london_session', 'ny_session', 'overlap_session'
         ]
+        
+        # Check which features have sufficient data quality
+        feature_columns = essential_features.copy()
+        
+        for feature in additional_features:
+            if feature in df.columns:
+                feature_data = df[feature].dropna()
+                # Only include if feature has good data coverage and variance
+                if len(feature_data) > len(df) * 0.8 and feature_data.std() > 1e-6:
+                    feature_columns.append(feature)
+                else:
+                    print(f"⚠️ Excluding feature {feature} due to poor data quality")
+        
+        print(f"Using {len(feature_columns)} features for HMM: {feature_columns}")
         
         self.features = df[feature_columns].dropna()
         self.data = df.loc[self.features.index]
@@ -220,30 +240,443 @@ class ForexHMMStrategy:
     
     def train_hmm(self):
         """
-        Train the Hidden Markov Model
+        Train the Hidden Markov Model with improved convergence handling
         """
         if self.features is None:
             raise ValueError("Features not created. Call create_features() first.")
         
-        # Scale features
-        features_scaled = self.scaler.fit_transform(self.features)
+        # Clean and validate features
+        features_clean = self.features.copy()
         
-        # Train HMM
-        print("Training HMM model...")
-        self.model = hmm.GaussianHMM(
-            n_components=self.n_components,
-            covariance_type="full",
-            n_iter=100,
-            random_state=42
-        )
+        # Remove infinite and NaN values
+        features_clean = features_clean.replace([np.inf, -np.inf], np.nan)
+        features_clean = features_clean.dropna()
         
-        self.model.fit(features_scaled)
+        if len(features_clean) < 100:
+            raise ValueError(f"Insufficient clean data for HMM training: {len(features_clean)} samples")
         
-        # Predict hidden states
+        print(f"Training HMM with {len(features_clean)} clean samples...")
+        
+        # Scale features with robust scaling
+        features_scaled = self.scaler.fit_transform(features_clean)
+        
+        # Check for constant features (zero variance)
+        feature_std = np.std(features_scaled, axis=0)
+        valid_features = feature_std > 1e-6
+        
+        if not np.all(valid_features):
+            print(f"⚠️ Removing {np.sum(~valid_features)} constant features")
+            features_scaled = features_scaled[:, valid_features]
+            # Update feature names for tracking
+            valid_feature_names = features_clean.columns[valid_features].tolist()
+            print(f"Using features: {valid_feature_names}")
+        
+        # Try multiple HMM configurations for better convergence
+        hmm_configs = [
+            {"covariance_type": "diag", "n_iter": 50},
+            {"covariance_type": "spherical", "n_iter": 50}, 
+            {"covariance_type": "full", "n_iter": 50},
+            {"covariance_type": "diag", "n_iter": 100},
+            {"covariance_type": "tied", "n_iter": 50}
+        ]
+        
+        best_model = None
+        best_score = -np.inf
+        
+        for config in hmm_configs:
+            try:
+                print(f"Trying HMM config: {config}")
+                
+                model = hmm.GaussianHMM(
+                    n_components=self.n_components,
+                    covariance_type=config["covariance_type"],
+                    n_iter=config["n_iter"],
+                    random_state=42,
+                    tol=1e-3,  # Relaxed tolerance
+                    verbose=False
+                )
+                
+                # Fit with error handling
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    model.fit(features_scaled)
+                
+                # Check if model converged
+                if hasattr(model, 'monitor_') and hasattr(model.monitor_, 'converged'):
+                    if not model.monitor_.converged:
+                        print(f"⚠️ Model did not converge with {config}")
+                        continue
+                
+                # Calculate model score (likelihood)
+                try:
+                    score = model.score(features_scaled)
+                    print(f"✅ Model score: {score:.2f}")
+                    
+                    if score > best_score and not np.isnan(score) and not np.isinf(score):
+                        best_score = score
+                        best_model = model
+                        print(f"🎯 New best model found!")
+                        
+                except Exception as e:
+                    print(f"❌ Error scoring model: {e}")
+                    continue
+                    
+            except Exception as e:
+                print(f"❌ Error training HMM with {config}: {e}")
+                continue
+        
+        if best_model is None:
+            print("❌ All HMM configurations failed, using fallback simple model")
+            # Fallback to simplest possible model
+            try:
+                self.model = hmm.GaussianHMM(
+                    n_components=2,  # Reduce to 2 states
+                    covariance_type="spherical",
+                    n_iter=20,
+                    random_state=42,
+                    tol=1e-2  # Very relaxed tolerance
+                )
+                
+                # Use only the most stable features for fallback
+                stable_features = features_scaled[:, :3]  # Use first 3 features only
+                self.model.fit(stable_features)
+                self.states = self.model.predict(stable_features)
+                
+                # Store the feature names for fallback model
+                self.trained_feature_names = list(features_clean.columns[:3])
+                print(f"✅ Fallback HMM model trained with 2 states using features: {self.trained_feature_names}")
+                
+            except Exception as e:
+                print(f"❌ Even fallback model failed: {e}")
+                # Ultimate fallback - create dummy model
+                self.create_dummy_model(features_scaled)
+                return self.model
+        else:
+            self.model = best_model
+            # Predict hidden states
+            self.states = self.model.predict(features_scaled)
+            print(f"✅ Best HMM model trained with {self.n_components} states (score: {best_score:.2f})")
+        
+        # Update features to match cleaned data
+        self.features = features_clean
+        self.data = self.data.loc[features_clean.index]
+        
+        # Store the feature names that were used for training
+        self.trained_feature_names = list(features_clean.columns)
+        print(f"✅ Stored trained feature names: {self.trained_feature_names}")
+        
+        return self.model
+    
+    def create_dummy_model(self, features_scaled):
+        """Create a dummy model when HMM training completely fails"""
+        print("🔄 Creating dummy model as ultimate fallback...")
+        
+        # Create a simple rule-based "model"
+        class DummyHMM:
+            def __init__(self, n_components=3):
+                self.n_components = n_components
+                
+            def predict(self, X):
+                # Simple rule: use price momentum to determine state
+                if len(X) > 0:
+                    # Use first feature (usually returns) to determine state
+                    returns = X[:, 0] if X.shape[1] > 0 else np.zeros(len(X))
+                    states = np.zeros(len(returns), dtype=int)
+                    
+                    # Assign states based on return quantiles
+                    q33 = np.percentile(returns, 33)
+                    q67 = np.percentile(returns, 67)
+                    
+                    states[returns <= q33] = 0  # Bearish
+                    states[(returns > q33) & (returns <= q67)] = 1  # Neutral
+                    states[returns > q67] = 2  # Bullish
+                    
+                    return states
+                return np.zeros(1, dtype=int)
+            
+            def predict_proba(self, X):
+                # Return uniform probabilities
+                states = self.predict(X)
+                probs = np.ones((len(states), self.n_components)) / self.n_components
+                return probs
+        
+        self.model = DummyHMM(self.n_components)
         self.states = self.model.predict(features_scaled)
         
-        print(f"HMM model trained with {self.n_components} states")
-        return self.model
+        # Store feature names for dummy model (use first 3 features)
+        if hasattr(self, 'features') and self.features is not None:
+            self.trained_feature_names = list(self.features.columns[:3])
+        else:
+            # Fallback feature names
+            self.trained_feature_names = ['returns', 'log_returns', 'price_change']
+        
+        print(f"✅ Dummy model created successfully using features: {self.trained_feature_names}")
+    
+    def retrain_for_symbol(self, symbol, period='3mo'):
+        """Retrain the model for a specific symbol when feature mismatch occurs"""
+        print(f"🔄 Retraining HMM model for symbol: {symbol}")
+        
+        # Update symbol
+        old_symbol = self.symbol
+        self.symbol = symbol
+        
+        try:
+            # Fetch new data for the symbol
+            self.fetch_data(period=period, interval='5m')
+            
+            # Create features
+            self.create_features()
+            
+            # Train HMM
+            self.train_hmm()
+            
+            print(f"✅ Model successfully retrained for {symbol}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to retrain model for {symbol}: {e}")
+            # Restore old symbol
+            self.symbol = old_symbol
+            return False
+    
+    def prepare_features(self, df):
+        """Prepare features from OHLC data for prediction - MUST match training features"""
+        try:
+            # Create a temporary copy for feature generation
+            temp_df = df.copy()
+            
+            # Ensure we have the required columns
+            required_columns = ['Open', 'High', 'Low', 'Close']
+            missing_columns = [col for col in required_columns if col not in temp_df.columns]
+            if missing_columns:
+                print(f"❌ Missing required columns: {missing_columns}")
+                return np.array([])
+            
+            # Add Volume column if missing (for compatibility)
+            if 'Volume' not in temp_df.columns:
+                temp_df['Volume'] = 1.0  # Dummy volume
+                print("⚠️ Volume column missing, using dummy values")
+            
+            print(f"🔧 Input DataFrame shape: {temp_df.shape}")
+            print(f"🔧 Input DataFrame columns: {list(temp_df.columns)}")
+            print(f"🔧 Input DataFrame index type: {type(temp_df.index)}")
+            
+            # COMPLETE FEATURE SET - matching create_features() exactly
+            
+            # Price-based features
+            temp_df['returns'] = temp_df['Close'].pct_change()
+            temp_df['log_returns'] = np.log(temp_df['Close'] / temp_df['Close'].shift(1))
+            temp_df['price_change'] = temp_df['Close'] - temp_df['Open']
+            temp_df['high_low_ratio'] = temp_df['High'] / temp_df['Low']
+            
+            # Volume-price feature (with fallback)
+            if 'Volume' in temp_df.columns:
+                temp_df['volume_price'] = temp_df['Volume'] * temp_df['Close']
+            else:
+                temp_df['volume_price'] = temp_df['Close']  # Fallback to just price
+            
+            # Technical indicators using TA library
+            try:
+                import ta
+                temp_df['rsi'] = ta.momentum.RSIIndicator(temp_df['Close'], window=14).rsi()
+                temp_df['macd'] = ta.trend.MACD(temp_df['Close']).macd()
+                temp_df['macd_signal'] = ta.trend.MACD(temp_df['Close']).macd_signal()
+                temp_df['bb_upper'] = ta.volatility.BollingerBands(temp_df['Close']).bollinger_hband()
+                temp_df['bb_lower'] = ta.volatility.BollingerBands(temp_df['Close']).bollinger_lband()
+                temp_df['bb_width'] = (temp_df['bb_upper'] - temp_df['bb_lower']) / temp_df['Close']
+                temp_df['atr'] = ta.volatility.AverageTrueRange(temp_df['High'], temp_df['Low'], temp_df['Close']).average_true_range()
+                temp_df['roc'] = ta.momentum.ROCIndicator(temp_df['Close'], window=10).roc()
+            except ImportError:
+                # Fallback calculations without TA library
+                # Simple RSI
+                delta = temp_df['Close'].diff()
+                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                rs = gain / loss
+                temp_df['rsi'] = 100 - (100 / (1 + rs))
+                
+                # Simple MACD
+                ema12 = temp_df['Close'].ewm(span=12).mean()
+                ema26 = temp_df['Close'].ewm(span=26).mean()
+                temp_df['macd'] = ema12 - ema26
+                temp_df['macd_signal'] = temp_df['macd'].ewm(span=9).mean()
+                
+                # Simple Bollinger Bands
+                sma20 = temp_df['Close'].rolling(20).mean()
+                std20 = temp_df['Close'].rolling(20).std()
+                temp_df['bb_upper'] = sma20 + (std20 * 2)
+                temp_df['bb_lower'] = sma20 - (std20 * 2)
+                temp_df['bb_width'] = (temp_df['bb_upper'] - temp_df['bb_lower']) / temp_df['Close']
+                
+                # Simple ATR
+                temp_df['high_low'] = temp_df['High'] - temp_df['Low']
+                temp_df['atr'] = temp_df['high_low'].rolling(14).mean()
+                
+                # Simple ROC
+                temp_df['roc'] = temp_df['Close'].pct_change(10) * 100
+            
+            # Moving averages
+            temp_df['sma_5'] = temp_df['Close'].rolling(5).mean()
+            temp_df['sma_10'] = temp_df['Close'].rolling(10).mean()
+            temp_df['sma_20'] = temp_df['Close'].rolling(20).mean()
+            temp_df['ema_5'] = temp_df['Close'].ewm(span=5).mean()
+            temp_df['ema_10'] = temp_df['Close'].ewm(span=10).mean()
+            
+            # Price position relative to moving averages
+            temp_df['price_sma5_ratio'] = temp_df['Close'] / temp_df['sma_5']
+            temp_df['price_sma10_ratio'] = temp_df['Close'] / temp_df['sma_10']
+            temp_df['price_sma20_ratio'] = temp_df['Close'] / temp_df['sma_20']
+            
+            # Volatility features
+            temp_df['volatility'] = temp_df['returns'].rolling(window=20).std()
+            
+            # Momentum features
+            temp_df['momentum'] = temp_df['Close'] / temp_df['Close'].shift(10)
+            
+            # Volume features (if available)
+            if 'Volume' in temp_df.columns and temp_df['Volume'].sum() > 0:
+                temp_df['volume_sma'] = temp_df['Volume'].rolling(window=20).mean()
+                temp_df['volume_ratio'] = temp_df['Volume'] / temp_df['volume_sma']
+            else:
+                temp_df['volume_ratio'] = 1.0
+            
+            # Time-based features for scalping (with proper datetime index handling)
+            try:
+                # Check if index is datetime-like
+                if hasattr(temp_df.index, 'hour'):
+                    temp_df['hour'] = temp_df.index.hour
+                    temp_df['minute'] = temp_df.index.minute
+                    temp_df['day_of_week'] = temp_df.index.dayofweek
+                else:
+                    # Create dummy time features if no datetime index
+                    print("⚠️ No datetime index found, using dummy time features")
+                    temp_df['hour'] = 12  # Default to noon (active trading time)
+                    temp_df['minute'] = 0
+                    temp_df['day_of_week'] = 1  # Default to Tuesday (mid-week)
+                
+                # Market session indicators (useful for forex)
+                temp_df['london_session'] = ((temp_df['hour'] >= 8) & (temp_df['hour'] < 16)).astype(int)
+                temp_df['ny_session'] = ((temp_df['hour'] >= 13) & (temp_df['hour'] < 21)).astype(int)
+                temp_df['tokyo_session'] = ((temp_df['hour'] >= 0) & (temp_df['hour'] < 8)).astype(int)
+                temp_df['overlap_session'] = ((temp_df['hour'] >= 13) & (temp_df['hour'] < 16)).astype(int)
+                
+            except Exception as time_error:
+                print(f"⚠️ Error creating time features: {time_error}")
+                # Fallback: create dummy time features
+                temp_df['hour'] = 12  # Default to noon
+                temp_df['minute'] = 0
+                temp_df['day_of_week'] = 1
+                temp_df['london_session'] = 1  # Default to active session
+                temp_df['ny_session'] = 1
+                temp_df['tokyo_session'] = 0
+                temp_df['overlap_session'] = 1
+            
+            # If we have trained feature names, use them directly
+            if hasattr(self, 'trained_feature_names') and self.trained_feature_names:
+                print(f"🎯 Using stored trained feature names: {self.trained_feature_names}")
+                feature_columns = self.trained_feature_names.copy()
+            else:
+                # Use the SAME feature selection logic as create_features()
+                print("🔧 No trained feature names found, using default feature selection")
+                essential_features = [
+                    'returns', 'log_returns', 'price_change', 
+                    'rsi', 'price_sma5_ratio', 'price_sma10_ratio',
+                    'atr', 'volatility', 'momentum'
+                ]
+                
+                additional_features = [
+                    'high_low_ratio', 'macd', 'bb_width', 'roc', 'volume_ratio',
+                    'london_session', 'ny_session', 'overlap_session'
+                ]
+                
+                # Check which features have sufficient data quality (same logic as training)
+                feature_columns = essential_features.copy()
+                
+                for feature in additional_features:
+                    if feature in temp_df.columns:
+                        feature_data = temp_df[feature].dropna()
+                        # Only include if feature has good data coverage and variance
+                        if len(feature_data) > len(temp_df) * 0.8 and feature_data.std() > 1e-6:
+                            feature_columns.append(feature)
+            
+            # Filter to available features and remove NaN
+            available_features = [f for f in feature_columns if f in temp_df.columns]
+            
+            print(f"🔧 Feature columns requested: {feature_columns}")
+            print(f"🔧 Available features: {available_features}")
+            
+            if not available_features:
+                print("❌ No features available after filtering")
+                return np.array([])
+            
+            feature_df = temp_df[available_features].dropna()
+            
+            print(f"🔧 Feature DataFrame shape after dropna: {feature_df.shape}")
+            
+            if len(feature_df) == 0:
+                print("⚠️ No valid features could be prepared after removing NaN")
+                print("🔧 Trying with forward fill...")
+                # Try forward fill to handle NaN values
+                feature_df = temp_df[available_features].fillna(method='ffill').dropna()
+                
+                if len(feature_df) == 0:
+                    print("❌ Still no valid features after forward fill")
+                    return np.array([])
+            
+            print(f"🔧 Final prepared features: {len(available_features)} features, {len(feature_df)} samples")
+            print(f"🔧 Feature names: {available_features}")
+            
+            # Scale features using the same scaler
+            if hasattr(self, 'scaler') and self.scaler is not None:
+                try:
+                    # Check if we have the trained feature names
+                    if hasattr(self, 'trained_feature_names'):
+                        print(f"🔧 Model expects features: {self.trained_feature_names}")
+                        print(f"🔧 Available features: {available_features}")
+                        
+                        # Ensure we have exactly the same features in the same order
+                        missing_features = [f for f in self.trained_feature_names if f not in available_features]
+                        extra_features = [f for f in available_features if f not in self.trained_feature_names]
+                        
+                        if missing_features:
+                            print(f"❌ Missing trained features: {missing_features}")
+                            return np.array([])
+                        
+                        if extra_features:
+                            print(f"⚠️ Extra features (will be ignored): {extra_features}")
+                        
+                        # Select only the trained features in the correct order
+                        feature_df_ordered = feature_df[self.trained_feature_names]
+                        print(f"✅ Using exact feature match: {list(feature_df_ordered.columns)}")
+                        
+                        features_scaled = self.scaler.transform(feature_df_ordered)
+                        return features_scaled
+                    else:
+                        # Fallback: try with available features
+                        print("⚠️ No trained feature names stored, trying with available features")
+                        features_scaled = self.scaler.transform(feature_df)
+                        return features_scaled
+                        
+                except ValueError as e:
+                    if "feature names" in str(e).lower():
+                        print(f"❌ Feature mismatch error: {e}")
+                        print(f"   Model expects features that were used during training")
+                        print(f"   Available features: {available_features}")
+                        if hasattr(self, 'trained_feature_names'):
+                            print(f"   Trained features: {self.trained_feature_names}")
+                        print(f"   This suggests the model needs retraining for current data")
+                        return np.array([])
+                    else:
+                        print(f"⚠️ Error scaling features: {e}")
+                        # Return unscaled features as fallback
+                        return feature_df.values
+            else:
+                # No scaler available, return raw features
+                return feature_df.values
+                
+        except Exception as e:
+            print(f"❌ Error preparing features: {e}")
+            return np.array([])
     
     def generate_signals(self):
         """

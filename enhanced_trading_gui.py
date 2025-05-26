@@ -91,10 +91,11 @@ class EnhancedTradingGUI:
         self.available_symbols = []
         
         # Trading settings
-        self.risk_per_trade = 2.0  # Default 2% risk per trade
+        self.risk_amount = 10.0  # Default $10 risk per trade (fixed amount)
         self.custom_balance = 10000  # Default balance
         self.capital = 10000
         self.initial_capital = 10000
+        self.min_sl_distance = 0.001  # Minimum stop loss distance (0.1% of price)
         
         # Contract specifications for proper position sizing and P&L calculation
         self.contract_specs = {
@@ -201,19 +202,26 @@ class EnhancedTradingGUI:
             'atr_multiplier': 1.5
         }
         
+        print(f"🎯 Initializing simulator for symbol: {self.trading_symbol}")
+        
         self.simulator = LiveTradingSimulator(
             strategy_params=strategy_params,
             initial_capital=10000,
-            symbol='BTCUSDm'
+            symbol=self.trading_symbol  # Use the selected symbol from GUI
         )
         
         # Initialize strategy in background
         def init_strategy():
             try:
+                print("🔄 Initializing HMM strategy...")
                 self.simulator.initialize_strategy()
                 print("✅ Strategy initialized successfully")
             except Exception as e:
                 print(f"❌ Strategy initialization failed: {e}")
+                print("🔄 Will use simplified trading logic as fallback")
+                # Mark strategy as failed so GUI can use fallback
+                if hasattr(self.simulator, 'strategy'):
+                    self.simulator.strategy = None
         
         threading.Thread(target=init_strategy, daemon=True).start()
     
@@ -254,15 +262,19 @@ class EnhancedTradingGUI:
         
         print("🎮 Enhanced GUI initialized with advanced controls!")
         print("   📊 Real-time candlestick charts with MT5 data")
-        print("   ⚙️ Trading Settings: Symbol, Balance, Risk % with SAVE button")
+        print("   ⚙️ Trading Settings: Symbol, Balance, Risk Amount (USD) with SAVE button")
         print("   💾 SAVE button applies balance and risk changes")
-        print("   🚀 START button loads last week's 1-minute data")
+        print("   🚀 START button loads historical data based on timeframe")
         print("   🔄 RESET and AUTO buttons for control")
         print("   🧠 HMM states visualization on the right")
         print("   💰 Multiple chart panels with historical simulation")
+        print("   🛡️ Advanced risk management with minimum SL distance validation")
+        print("   🎯 Fixed SL/TP levels - no trailing stops for consistent P&L")
+        print("   🔍 CHECK SL button for position validation")
         print(f"   📈 Default symbol: {self.trading_symbol}")
         print(f"   💰 Current balance: ${self.custom_balance:,.2f}")
-        print(f"   ⚡ Current risk: {self.risk_per_trade}% per trade")
+        print(f"   ⚡ Current risk: ${self.risk_amount:.2f} USD per trade (fixed amount)")
+        print(f"   📏 Minimum SL distance validation prevents unsafe trades")
         print("   🎯 Adjust settings, click SAVE, then START to begin!")
     
     def create_dashboard(self, parent):
@@ -361,9 +373,9 @@ class EnhancedTradingGUI:
         row2 = ttk.Frame(settings_container, style='Gaming.TFrame')
         row2.pack(fill=tk.X, pady=5)
         
-        # Risk per Trade
-        ttk.Label(row2, text="⚡ RISK %:", style='Neon.TLabel').pack(side=tk.LEFT, padx=(0,5))
-        self.risk_var = tk.StringVar(value=str(self.risk_per_trade))
+        # Risk Amount (Fixed USD)
+        ttk.Label(row2, text="⚡ RISK $:", style='Neon.TLabel').pack(side=tk.LEFT, padx=(0,5))
+        self.risk_var = tk.StringVar(value=str(self.risk_amount))
         risk_entry = tk.Entry(row2, textvariable=self.risk_var, width=8,
                             bg=self.colors['panel'], fg=self.colors['neon_green'],
                             font=('Consolas', 10, 'bold'), relief='raised', bd=2)
@@ -371,7 +383,7 @@ class EnhancedTradingGUI:
         
         # Current Risk Display
         ttk.Label(row2, text="CURRENT:", style='Neon.TLabel').pack(side=tk.LEFT, padx=(0,5))
-        self.current_risk_label = ttk.Label(row2, text=f"{self.risk_per_trade}%", style='Profit.TLabel')
+        self.current_risk_label = ttk.Label(row2, text=f"${self.risk_amount:.2f}", style='Profit.TLabel')
         self.current_risk_label.pack(side=tk.LEFT, padx=(0,15))
         
         # SAVE Button
@@ -418,6 +430,24 @@ class EnhancedTradingGUI:
                                   relief='raised', padx=15, pady=8, bd=3,
                                   activebackground='#cc00cc')
         strategy_button.pack(side=tk.LEFT, padx=5)
+        
+        # Add position monitoring button
+        monitor_button = tk.Button(buttons_frame, text="🔍 MONITOR", 
+                                 command=self.monitor_all_positions,
+                                 bg=self.colors['neon_blue'], fg=self.colors['bg'], 
+                                 font=('Consolas', 11, 'bold'),
+                                 relief='raised', padx=15, pady=8, bd=3,
+                                 activebackground='#0088cc')
+        monitor_button.pack(side=tk.LEFT, padx=5)
+        
+        # Add balance test button
+        test_button = tk.Button(buttons_frame, text="🧪 TEST BAL", 
+                               command=self.test_balance_update,
+                               bg=self.colors['neon_yellow'], fg=self.colors['bg'], 
+                               font=('Consolas', 11, 'bold'),
+                               relief='raised', padx=15, pady=8, bd=3,
+                               activebackground='#ffcc00')
+        test_button.pack(side=tk.LEFT, padx=5)
         
         # Right panel - HMM State indicator
         right_panel = ttk.Frame(dashboard_frame, style='Gaming.TFrame')
@@ -594,14 +624,18 @@ class EnhancedTradingGUI:
                                 self.hmm_states.append(state)
                                 self.state_probabilities.append(state_probs)
                         
-                        # Generate trading signals using real HMM strategy (less frequently)
-                        if len(self.ohlc_data) > 50 and self.current_bar_index % 10 == 0:  # Every 10 bars
+                        # Generate trading signals using real HMM strategy (more frequent for scalping)
+                        if len(self.ohlc_data) > 30 and self.current_bar_index % 5 == 0:  # Every 5 bars for scalping
                             self.generate_hmm_trade_signal()
                         
 
                         
                         # Update positions
                         self.update_positions()
+                        
+                        # Monitor positions every 50 bars for SL validity
+                        if self.current_bar_index % 50 == 0:
+                            self.monitor_all_positions()
                         
                         self.current_bar_index += 1
                         
@@ -665,12 +699,19 @@ class EnhancedTradingGUI:
                     self.hmm_states.append(state)
                     self.state_probabilities.append(state_probs)
                     
-                    # Generate trading signals - deterministic based on data
-                    if len(self.ohlc_data) > 20:
-                        self.generate_trade_signal()
+                    # Generate trading signals - frequent for scalping
+                    if len(self.ohlc_data) > 30:  # Reduced data requirement for faster signals
+                        # Generate signals more frequently for scalping strategy
+                        signal_frequency = len(self.ohlc_data) % 3  # Every 3 bars for active scalping
+                        if signal_frequency == 0:
+                            self.generate_trade_signal()
                     
                     # Update positions
                     self.update_positions()
+                    
+                    # Monitor positions periodically in live mode
+                    if len(self.ohlc_data) % 20 == 0:  # Every 20 bars in live mode
+                        self.monitor_all_positions()
                 
                 # Adjust sleep time based on mode and timeframe
                 if self.is_simulating:
@@ -709,7 +750,7 @@ class EnhancedTradingGUI:
         try:
             if hasattr(self.simulator, 'strategy') and self.simulator.strategy:
                 # Try to get the current HMM state from the strategy
-                if hasattr(self.simulator.strategy, 'hmm_model') and self.simulator.strategy.hmm_model:
+                if hasattr(self.simulator.strategy, 'model') and self.simulator.strategy.model:
                     # Convert OHLC data to DataFrame for strategy
                     if len(self.ohlc_data) >= 50:  # Need enough data for HMM
                         recent_data = list(self.ohlc_data)[-50:]  # Last 50 bars
@@ -723,18 +764,67 @@ class EnhancedTradingGUI:
                         df = pd.DataFrame(df_data)
                         
                         # Get features and predict state
-                        features = self.simulator.strategy.prepare_features(df)
-                        if len(features) > 0:
-                            # Get the most recent state prediction
-                            states = self.simulator.strategy.hmm_model.predict(features)
-                            current_state = states[-1]
-                            
-                            # Get state probabilities
-                            state_probs = self.simulator.strategy.hmm_model.predict_proba(features)
-                            current_probs = state_probs[-1].tolist()
-                            
-                            print(f"🧠 Real HMM State: {current_state} | Probs: {[f'{p:.2f}' for p in current_probs]}")
-                            return current_state, current_probs
+                        try:
+                            features = self.simulator.strategy.prepare_features(df)
+                            if len(features) > 0:
+                                # Get the most recent state prediction
+                                states = self.simulator.strategy.model.predict(features)
+                                current_state = states[-1]
+                                
+                                # Get state probabilities
+                                state_probs = self.simulator.strategy.model.predict_proba(features)
+                                current_probs = state_probs[-1].tolist()
+                                
+                                print(f"🧠 Real HMM State: {current_state} | Probs: {[f'{p:.2f}' for p in current_probs]}")
+                                return current_state, current_probs
+                            else:
+                                # Features preparation failed - likely feature mismatch
+                                print(f"⚠️ Feature preparation failed for {self.trading_symbol}")
+                                print(f"🔄 Attempting to retrain model for {self.trading_symbol}...")
+                                
+                                # Try to retrain the model for current symbol
+                                if hasattr(self.simulator.strategy, 'retrain_for_symbol'):
+                                    success = self.simulator.strategy.retrain_for_symbol(self.trading_symbol)
+                                    if success:
+                                        print(f"✅ Model retrained successfully for {self.trading_symbol}")
+                                        # Try again with retrained model
+                                        try:
+                                            features = self.simulator.strategy.prepare_features(df)
+                                            if len(features) > 0:
+                                                states = self.simulator.strategy.model.predict(features)
+                                                current_state = states[-1]
+                                                state_probs = self.simulator.strategy.model.predict_proba(features)
+                                                current_probs = state_probs[-1].tolist()
+                                                return current_state, current_probs
+                                        except Exception as retry_e:
+                                            print(f"❌ Retry after retraining failed: {retry_e}")
+                                
+                                # If retraining failed, fall back to market regime
+                                print(f"❌ Model retraining failed, using market regime fallback")
+                                pass
+                        except Exception as e:
+                            print(f"⚠️ Error getting HMM state: {e}")
+                            # Check if it's a feature mismatch error
+                            if "feature names" in str(e).lower():
+                                print(f"🔄 Feature mismatch detected, attempting model retraining...")
+                                # Try to retrain the model for current symbol
+                                if hasattr(self.simulator.strategy, 'retrain_for_symbol'):
+                                    success = self.simulator.strategy.retrain_for_symbol(self.trading_symbol)
+                                    if success:
+                                        print(f"✅ Model retrained successfully for {self.trading_symbol}")
+                                        # Try again with retrained model
+                                        try:
+                                            features = self.simulator.strategy.prepare_features(df)
+                                            if len(features) > 0:
+                                                states = self.simulator.strategy.model.predict(features)
+                                                current_state = states[-1]
+                                                state_probs = self.simulator.strategy.model.predict_proba(features)
+                                                current_probs = state_probs[-1].tolist()
+                                                return current_state, current_probs
+                                        except Exception as retry_e:
+                                            print(f"❌ Retry after retraining failed: {retry_e}")
+                            # Fallback to market regime calculation
+                            pass
         except Exception as e:
             print(f"⚠️ Could not get real HMM state: {e}")
         
@@ -849,7 +939,9 @@ class EnhancedTradingGUI:
     
     def generate_hmm_trade_signal(self):
         """Generate trading signal using real HMM strategy"""
-        if len(self.positions) >= 3:  # Max 3 positions
+        if len(self.positions) >= 2:  # Max 2 positions as per risk management
+            if len(self.ohlc_data) % 100 == 0:  # Only show message occasionally
+                print(f"⚠️ Maximum position limit reached (2/2) - skipping HMM signals")
             return
         
         try:
@@ -859,41 +951,166 @@ class EnhancedTradingGUI:
                 self.generate_simplified_signal_from_ohlc()
                 return
             
-            # Use the simulator's generate_signal method which properly handles the strategy
-            signal = self.simulator.generate_signal()
-            if signal and signal.get('signal', 0) != 0:
-                self.execute_hmm_trade(signal)
-            else:
-                # No signal generated, use simplified logic as fallback
-                self.generate_simplified_signal_from_ohlc()
+            # Convert OHLC data to DataFrame for strategy
+            if len(self.ohlc_data) >= 50:  # Need enough data for HMM
+                recent_data = list(self.ohlc_data)[-50:]  # Last 50 bars
+                df_data = {
+                    'Open': [bar['open'] for bar in recent_data],
+                    'High': [bar['high'] for bar in recent_data],
+                    'Low': [bar['low'] for bar in recent_data],
+                    'Close': [bar['close'] for bar in recent_data],
+                    'Volume': [bar['volume'] for bar in recent_data]
+                }
+                df = pd.DataFrame(df_data)
+                
+                # Get features and predict state directly from strategy
+                try:
+                    features = self.simulator.strategy.prepare_features(df)
+                    if len(features) > 0:
+                        # Get the most recent state prediction
+                        states = self.simulator.strategy.model.predict(features)
+                        current_state = states[-1]
+                        
+                        # Get state probabilities
+                        state_probs = self.simulator.strategy.model.predict_proba(features)
+                        current_probs = state_probs[-1].tolist()
+                        
+                        # Generate signal based on HMM state
+                        signal = self.generate_signal_from_hmm_state(current_state, current_probs, df.iloc[-1])
+                        if signal:
+                            self.execute_hmm_trade(signal)
+                            return
+                        
+                        print(f"🧠 HMM State: {current_state} | Probs: {[f'{p:.2f}' for p in current_probs]} | No signal")
+                    else:
+                        print(f"⚠️ Feature preparation failed for {self.trading_symbol}")
+                        # Try to retrain the model for current symbol
+                        if hasattr(self.simulator.strategy, 'retrain_for_symbol'):
+                            print(f"🔄 Attempting to retrain model for {self.trading_symbol}...")
+                            success = self.simulator.strategy.retrain_for_symbol(self.trading_symbol)
+                            if success:
+                                print(f"✅ Model retrained successfully for {self.trading_symbol}")
+                            else:
+                                print(f"❌ Model retraining failed, using market regime fallback")
+                        
+                except Exception as e:
+                    print(f"⚠️ Error getting HMM state: {e}")
+                    # Check if it's a feature mismatch error
+                    if "feature names" in str(e).lower():
+                        print(f"🔄 Feature mismatch detected, attempting model retraining...")
+                        if hasattr(self.simulator.strategy, 'retrain_for_symbol'):
+                            success = self.simulator.strategy.retrain_for_symbol(self.trading_symbol)
+                            if success:
+                                print(f"✅ Model retrained successfully for {self.trading_symbol}")
+                                return  # Try again next time
+                            else:
+                                print(f"❌ Model retraining failed")
+            
+            # Fallback to simplified signal generation
+            self.generate_simplified_signal_from_ohlc()
                 
         except Exception as e:
             print(f"❌ Error generating HMM signal: {e}")
             # Fallback to simplified signal
             self.generate_simplified_signal_from_ohlc()
     
-
+    def generate_signal_from_hmm_state(self, current_state, state_probs, current_bar):
+        """Generate trading signal based on HMM state and probabilities"""
+        try:
+            # State interpretation: 0=Bearish, 1=Neutral, 2=Bullish (typically)
+            # Use probabilities to determine signal strength
+            
+            # Get the highest probability state
+            max_prob_state = np.argmax(state_probs)
+            max_prob = state_probs[max_prob_state]
+            
+            # Require high confidence for trading
+            min_confidence = 0.6  # 60% minimum confidence
+            
+            if max_prob < min_confidence:
+                return None  # Not confident enough
+            
+            # Additional technical confirmation using current bar data
+            current_price = current_bar['Close']
+            
+            # Calculate simple momentum for confirmation
+            if len(self.ohlc_data) >= 10:
+                recent_closes = [bar['close'] for bar in list(self.ohlc_data)[-10:]]
+                sma_5 = np.mean(recent_closes[-5:])
+                sma_10 = np.mean(recent_closes)
+                
+                # Trend confirmation
+                trend_bullish = current_price > sma_5 > sma_10
+                trend_bearish = current_price < sma_5 < sma_10
+            else:
+                trend_bullish = trend_bearish = False
+            
+            # Generate signal based on state and confirmation
+            signal = None
+            
+            if max_prob_state == 2 and max_prob > 0.65:  # Strong bullish state
+                if trend_bullish or max_prob > 0.8:  # Either trend confirmation or very high confidence
+                    signal = {
+                        'signal': 1,  # Buy
+                        'confidence': max_prob,
+                        'state': current_state,
+                        'reason': f'HMM Bullish State (prob: {max_prob:.2f})'
+                    }
+            elif max_prob_state == 0 and max_prob > 0.65:  # Strong bearish state
+                if trend_bearish or max_prob > 0.8:  # Either trend confirmation or very high confidence
+                    signal = {
+                        'signal': -1,  # Sell
+                        'confidence': max_prob,
+                        'state': current_state,
+                        'reason': f'HMM Bearish State (prob: {max_prob:.2f})'
+                    }
+            
+            if signal:
+                print(f"🧠 HMM Signal Generated: {signal['reason']}")
+                print(f"   State: {current_state} | Max Prob: {max_prob:.2f} | Direction: {'BUY' if signal['signal'] == 1 else 'SELL'}")
+            
+            return signal
+            
+        except Exception as e:
+            print(f"❌ Error generating signal from HMM state: {e}")
+            return None
 
     def generate_simplified_signal_from_ohlc(self):
-        """Generate simplified trading signal from OHLC data"""
-        if len(self.ohlc_data) < 20:
+        """Generate scalping signals from OHLC data - optimized for frequent trading"""
+        if len(self.ohlc_data) < 20:  # Reduced requirement for faster signal generation
             return
         
-        # Get recent price data
-        recent_closes = [bar['close'] for bar in list(self.ohlc_data)[-20:]]
+        # Enforce maximum 2 positions limit
+        if len(self.positions) >= 2:
+            if len(self.ohlc_data) % 100 == 0:  # Only show message occasionally to avoid spam
+                print(f"⚠️ Maximum position limit reached (2/2) - skipping new signals")
+            return
+        
+        # Get recent price data - shorter period for scalping
+        recent_data = list(self.ohlc_data)[-30:]  # Use last 30 bars for faster signals
+        recent_closes = [bar['close'] for bar in recent_data]
+        recent_highs = [bar['high'] for bar in recent_data]
+        recent_lows = [bar['low'] for bar in recent_data]
+        recent_volumes = [bar['volume'] for bar in recent_data]
+        
         current_price = recent_closes[-1]
         
-        # Simple moving average
-        sma_20 = np.mean(recent_closes)
+        # Calculate shorter timeframe moving averages for scalping
+        sma_5 = np.mean(recent_closes[-5:])   # Very short term
+        sma_10 = np.mean(recent_closes[-10:]) # Short term
+        sma_20 = np.mean(recent_closes[-20:]) # Medium term
         
-        # Simple RSI calculation
+        # Calculate RSI with shorter period for scalping
         price_changes = np.diff(recent_closes)
         gains = np.where(price_changes > 0, price_changes, 0)
         losses = np.where(price_changes < 0, -price_changes, 0)
         
-        if len(gains) >= 14:
-            avg_gain = np.mean(gains[-14:])
-            avg_loss = np.mean(losses[-14:])
+        # Use shorter RSI period for scalping (9 instead of 14)
+        rsi_period = min(9, len(gains))
+        if len(gains) >= rsi_period:
+            avg_gain = gains[-rsi_period:].mean()
+            avg_loss = losses[-rsi_period:].mean()
+            
             if avg_loss > 0:
                 rs = avg_gain / avg_loss
                 rsi = 100 - (100 / (1 + rs))
@@ -902,15 +1119,143 @@ class EnhancedTradingGUI:
         else:
             rsi = 50  # Neutral
         
-        # Generate signal based on conditions - more deterministic approach
-        if current_price > sma_20 and 30 < rsi < 70:
-            # Buy signal - only if RSI shows momentum
-            if rsi < 60:  # Not overbought
-                self.execute_simple_trade(1, current_price)
-        elif current_price < sma_20 and 30 < rsi < 70:
-            # Sell signal - only if RSI shows momentum
-            if rsi > 40:  # Not oversold
-                self.execute_simple_trade(-1, current_price)
+        # Calculate volatility (ATR-like) - shorter period for scalping
+        ranges = [(recent_highs[i] - recent_lows[i]) for i in range(len(recent_highs))]
+        atr = np.mean(ranges[-7:])  # Shorter ATR period for scalping
+        current_range = recent_highs[-1] - recent_lows[-1]
+        volatility_ratio = current_range / atr if atr > 0 else 1
+        
+        # Calculate momentum - shorter periods for scalping
+        momentum_3 = (current_price - recent_closes[-4]) / recent_closes[-4] if len(recent_closes) >= 4 else 0
+        momentum_5 = (current_price - recent_closes[-6]) / recent_closes[-6] if len(recent_closes) >= 6 else 0
+        
+        # Calculate volume trend (if available)
+        volume_trend = 1
+        if len(recent_volumes) >= 10 and recent_volumes[-1] > 0:
+            avg_volume = np.mean(recent_volumes[-10:])
+            volume_trend = recent_volumes[-1] / avg_volume if avg_volume > 0 else 1
+        
+        # Enhanced signal generation with improved accuracy filters
+        bullish_signals = 0
+        bearish_signals = 0
+        
+        # Stronger trend confirmation required
+        if current_price > sma_5 > sma_10 > sma_20:  # All MAs aligned bullish
+            bullish_signals += 3
+        elif current_price < sma_5 < sma_10 < sma_20:  # All MAs aligned bearish
+            bearish_signals += 3
+        elif current_price > sma_5 > sma_10:  # Short-term uptrend only
+            bullish_signals += 1
+        elif current_price < sma_5 < sma_10:  # Short-term downtrend only
+            bearish_signals += 1
+        
+        # Momentum signals - very sensitive for active scalping
+        if momentum_3 > 0.0003 and momentum_5 > 0.0005:  # Any bullish momentum
+            bullish_signals += 2
+        elif momentum_3 < -0.0003 and momentum_5 < -0.0005:  # Any bearish momentum
+            bearish_signals += 2
+        
+        # Additional single momentum signals for maximum opportunities
+        if momentum_3 > 0.0002:  # Very small bullish momentum
+            bullish_signals += 1
+        elif momentum_3 < -0.0002:  # Very small bearish momentum
+            bearish_signals += 1
+        
+        # RSI signals - very wide range for active trading
+        if rsi > 40:  # Any bullish RSI
+            bullish_signals += 1
+        elif rsi < 60:  # Any bearish RSI
+            bearish_signals += 1
+        
+        # Price action confirmation - check for breakouts
+        recent_high = max(recent_highs[-5:])
+        recent_low = min(recent_lows[-5:])
+        price_range = recent_high - recent_low
+        
+        if price_range > 0:
+            # Breakout above recent high
+            if current_price > recent_high * 1.0002:  # 0.02% breakout
+                bullish_signals += 2
+            # Breakdown below recent low
+            elif current_price < recent_low * 0.9998:  # 0.02% breakdown
+                bearish_signals += 2
+        
+        # Volume confirmation - very lenient for active scalping
+        if volume_trend > 1.05:  # Very low volume requirement
+            if bullish_signals > bearish_signals:
+                bullish_signals += 1
+            elif bearish_signals > bullish_signals:
+                bearish_signals += 1
+        
+        # Volatility filter - minimal restriction for active trading
+        if volatility_ratio < 0.2:  # Very low volatility requirement
+            if len(self.ohlc_data) % 100 == 0:  # Reduce spam
+                print(f"⚠️ Extremely low volatility detected ({volatility_ratio:.2f}) - skipping trade")
+            return
+        
+        # Market session filter - removed for maximum activity
+        # Allow trading 24/7 for active scalping
+        # (No session restrictions)
+        
+        # Check for sufficient signal strength - very active for scalping
+        min_signal_strength = 2  # Low requirement for active scalping
+        signal_difference = abs(bullish_signals - bearish_signals)
+        
+        # Allow trades with any positive signal strength
+        if bullish_signals >= min_signal_strength or bearish_signals >= min_signal_strength:
+            if bullish_signals >= min_signal_strength and bullish_signals > bearish_signals:
+                # Additional confluence check
+                price_position = (current_price - min(recent_lows[-10:])) / (max(recent_highs[-10:]) - min(recent_lows[-10:]))
+                
+                # Multiple confirmations required - very lenient for active scalping
+                confirmations = 0
+                if price_position > 0.2:  # Allow buying near bottom
+                    confirmations += 1
+                if rsi > 35:  # Very low RSI threshold
+                    confirmations += 1
+                if momentum_5 > momentum_3:  # Accelerating momentum
+                    confirmations += 1
+                if volume_trend > 1.0:  # Any volume above average
+                    confirmations += 1
+                
+                if confirmations >= 1:  # Need only 1 confirmation for active scalping
+                    print(f"📈 SCALP BUY: Bull={bullish_signals}, Bear={bearish_signals}, Conf={confirmations}")
+                    print(f"   RSI: {rsi:.1f} | Mom3: {momentum_3*100:.3f}% | Mom5: {momentum_5*100:.3f}% | Vol: {volume_trend:.2f}x | Pos: {price_position:.2f}")
+                    self.execute_simple_trade(1, current_price)
+                else:
+                    # Even with no confirmations, allow some trades based on strong signals
+                    if bullish_signals >= 4:  # Very strong signal can override confirmations
+                        print(f"📈 STRONG BUY (override): Bull={bullish_signals}, Bear={bearish_signals}")
+                        self.execute_simple_trade(1, current_price)
+            
+            elif bearish_signals >= min_signal_strength and bearish_signals > bullish_signals:
+                # Additional confluence check
+                price_position = (current_price - min(recent_lows[-10:])) / (max(recent_highs[-10:]) - min(recent_lows[-10:]))
+                
+                # Multiple confirmations required - very lenient for active scalping
+                confirmations = 0
+                if price_position < 0.8:  # Allow selling near top
+                    confirmations += 1
+                if rsi < 65:  # Very high RSI threshold
+                    confirmations += 1
+                if momentum_5 < momentum_3:  # Accelerating downward momentum
+                    confirmations += 1
+                if volume_trend > 1.0:  # Any volume above average
+                    confirmations += 1
+                
+                if confirmations >= 1:  # Need only 1 confirmation for active scalping
+                    print(f"📉 SCALP SELL: Bull={bullish_signals}, Bear={bearish_signals}, Conf={confirmations}")
+                    print(f"   RSI: {rsi:.1f} | Mom3: {momentum_3*100:.3f}% | Mom5: {momentum_5*100:.3f}% | Vol: {volume_trend:.2f}x | Pos: {price_position:.2f}")
+                    self.execute_simple_trade(-1, current_price)
+                else:
+                    # Even with no confirmations, allow some trades based on strong signals
+                    if bearish_signals >= 4:  # Very strong signal can override confirmations
+                        print(f"📉 STRONG SELL (override): Bull={bullish_signals}, Bear={bearish_signals}")
+                        self.execute_simple_trade(-1, current_price)
+        else:
+            # Show analysis for debugging but don't spam
+            if (bullish_signals > 0 or bearish_signals > 0) and len(self.ohlc_data) % 30 == 0:
+                print(f"⚠️ Weak directional bias: Bull={bullish_signals}, Bear={bearish_signals}, Diff={signal_difference} - need stronger signal")
     
     def generate_simplified_signal(self, df):
         """Generate simplified trading signal based on price action (legacy method)"""
@@ -942,38 +1287,70 @@ class EnhancedTradingGUI:
         return rsi.iloc[-1] if not rsi.empty else 50
     
     def execute_simple_trade(self, direction, entry_price):
-        """Execute a simple trade with proper risk management"""
-        # Calculate stop loss based on last 10 candles (including signal candle)
-        if len(self.ohlc_data) >= 10:
-            last_10_candles = list(self.ohlc_data)[-10:]  # Last 10 candles including current
+        """Execute a simple trade with proper risk management and minimum SL distance validation"""
+        # Calculate dynamic stop loss based on market structure and volatility
+        if len(self.ohlc_data) >= 20:
+            recent_candles = list(self.ohlc_data)[-20:]
+            
+            # Calculate ATR for dynamic stop loss
+            ranges = [(candle['high'] - candle['low']) for candle in recent_candles[-14:]]
+            atr = np.mean(ranges)
+            
+            # Find recent swing points for better stop loss placement
+            recent_highs = [candle['high'] for candle in recent_candles[-10:]]
+            recent_lows = [candle['low'] for candle in recent_candles[-10:]]
             
             if direction == 1:  # Buy trade
-                # SL = Low of last 10 candles
-                stop_loss = min(candle['low'] for candle in last_10_candles)
+                # Use the lowest low of last 5 candles or ATR-based, whichever is closer
+                swing_low = min(recent_lows[-5:])
+                atr_stop = entry_price - (atr * 1.5)
+                stop_loss = max(swing_low, atr_stop)  # Use the higher (closer) stop
+                
+                # Ensure minimum distance
+                min_distance = entry_price * 0.0008  # 0.08% minimum
+                if entry_price - stop_loss < min_distance:
+                    stop_loss = entry_price - min_distance
+                    
             else:  # Sell trade
-                # SL = High of last 10 candles
-                stop_loss = max(candle['high'] for candle in last_10_candles)
+                # Use the highest high of last 5 candles or ATR-based, whichever is closer
+                swing_high = max(recent_highs[-5:])
+                atr_stop = entry_price + (atr * 1.5)
+                stop_loss = min(swing_high, atr_stop)  # Use the lower (closer) stop
+                
+                # Ensure minimum distance
+                min_distance = entry_price * 0.0008  # 0.08% minimum
+                if stop_loss - entry_price < min_distance:
+                    stop_loss = entry_price + min_distance
         else:
-            # Fallback if not enough candles - use percentage-based SL
+            # Fallback for insufficient data - use conservative ATR-based stops
             timeframe_str = self.timeframe_var.get()
             if timeframe_str == "M1":
-                stop_loss_distance = entry_price * 0.001
+                stop_loss_distance = entry_price * 0.0015  # Tighter for M1
             elif timeframe_str == "M5":
                 stop_loss_distance = entry_price * 0.002
             elif timeframe_str == "M15":
-                stop_loss_distance = entry_price * 0.003
+                stop_loss_distance = entry_price * 0.0025
             elif timeframe_str == "M30":
-                stop_loss_distance = entry_price * 0.004
+                stop_loss_distance = entry_price * 0.003
             else:  # H1
-                stop_loss_distance = entry_price * 0.005
+                stop_loss_distance = entry_price * 0.004
             
             if direction == 1:
                 stop_loss = entry_price - stop_loss_distance
             else:
                 stop_loss = entry_price + stop_loss_distance
         
-        # Calculate stop loss distance for TP calculation
+        # Validate minimum stop loss distance
         stop_loss_distance = abs(entry_price - stop_loss)
+        min_distance = self.get_minimum_sl_distance(entry_price)
+        
+        if stop_loss_distance < min_distance:
+            print(f"❌ Trade rejected: SL too close ({stop_loss_distance:.5f} < {min_distance:.5f})")
+            print(f"   Entry: {entry_price:.5f} | SL: {stop_loss:.5f}")
+            print(f"   Candles too small for safe trading - avoiding trade")
+            return  # Skip this trade
+        
+        # Capital validation removed - allow trading regardless of balance
         
         # Calculate take profit with 1:1.5 risk-reward ratio
         if direction == 1:  # Buy
@@ -981,13 +1358,11 @@ class EnhancedTradingGUI:
         else:  # Sell
             take_profit = entry_price - stop_loss_distance * 1.5
         
-        # Calculate position size using proper lot sizing
-        risk_amount = self.capital * (self.risk_per_trade / 100)
-        stop_loss_distance = abs(entry_price - stop_loss)
-        lot_size = self.calculate_lot_size(risk_amount, stop_loss_distance, entry_price)
+        # Calculate position size using fixed risk amount
+        lot_size = self.calculate_lot_size(self.risk_amount, stop_loss_distance, entry_price)
         
         # Verify risk calculation
-        actual_risk = self.verify_risk_calculation(entry_price, stop_loss, lot_size, risk_amount)
+        actual_risk = self.verify_risk_calculation(entry_price, stop_loss, lot_size, self.risk_amount)
         
         position = {
             'id': len(self.trades_history) + 1,
@@ -997,7 +1372,7 @@ class EnhancedTradingGUI:
             'stop_loss': stop_loss,
             'take_profit': take_profit,
             'lot_size': lot_size,
-            'risk_amount': risk_amount,  # Store original risk amount
+            'risk_amount': self.risk_amount,  # Store fixed risk amount
             'actual_risk': actual_risk,  # Store actual calculated risk
             'status': 'open'
         }
@@ -1007,91 +1382,38 @@ class EnhancedTradingGUI:
         self.add_particle_effect(entry_price, direction)
         
         timeframe_str = self.timeframe_var.get()
-        print(f"🎯 Trade ({timeframe_str}): {'BUY' if direction == 1 else 'SELL'} at {entry_price:.2f}")
-        print(f"   SL: {stop_loss:.2f} (10-candle {'low' if direction == 1 else 'high'}) | TP: {take_profit:.2f}")
-        print(f"   Risk: {self.risk_per_trade}% (${risk_amount:.2f}) | Lot: {lot_size:.4f} | RR: 1:1.5")
+        # Verify Risk-Reward Ratio
+        tp_distance = abs(take_profit - entry_price)
+        actual_rr_ratio = tp_distance / stop_loss_distance
+        
+        print(f"🎯 Trade ({timeframe_str}): {'BUY' if direction == 1 else 'SELL'} at {entry_price:.5f}")
+        print(f"   SL: {stop_loss:.5f} (distance: {stop_loss_distance:.5f}) | TP: {take_profit:.5f}")
+        print(f"   TP Distance: {tp_distance:.5f} | Actual RR: 1:{actual_rr_ratio:.2f}")
+        print(f"   Risk: ${self.risk_amount:.2f} (fixed) | Lot: {lot_size:.4f}")
+        print(f"   SL validation: {stop_loss_distance:.5f} >= {min_distance:.5f} ✅")
         print(f"   Total positions: {len(self.positions)}")
+        
+        # Verify RR ratio is close to 1:1.5
+        if abs(actual_rr_ratio - 1.5) > 0.1:
+            print(f"⚠️ WARNING: Risk-Reward ratio is {actual_rr_ratio:.2f}, not 1.5!")
     
     def execute_hmm_trade(self, signal):
-        """Execute trade from real HMM strategy signal"""
+        """Execute trade from real HMM strategy signal with validation"""
         direction = signal['signal']
         entry_price = self.current_price
         
-        # Calculate stop loss based on last 10 candles (including signal candle)
-        if len(self.ohlc_data) >= 10:
-            last_10_candles = list(self.ohlc_data)[-10:]  # Last 10 candles including current
+        # Calculate stop loss based on signal type and market structure
+        if 'stop_loss_pips' in signal and 'take_profit_pips' in signal:
+            # Signal from LiveTradingSimulator (has pip values)
+            spec = self.get_contract_spec()
+            stop_loss_distance = signal['stop_loss_pips'] * spec['pip_size']
             
-            if direction == 1:  # Buy trade
-                # SL = Low of last 10 candles
-                stop_loss = min(candle['low'] for candle in last_10_candles)
-            else:  # Sell trade
-                # SL = High of last 10 candles
-                stop_loss = max(candle['high'] for candle in last_10_candles)
-        else:
-            # Fallback to ATR-based levels if not enough candles
-            recent_prices = [bar['close'] for bar in list(self.ohlc_data)[-20:]]
-            atr = np.std(recent_prices) if len(recent_prices) >= 20 else entry_price * 0.02
-            
-            stop_loss_distance = atr * 1.5
             if direction == 1:
                 stop_loss = entry_price - stop_loss_distance
             else:
                 stop_loss = entry_price + stop_loss_distance
-        
-        # Calculate stop loss distance for TP calculation
-        stop_loss_distance = abs(entry_price - stop_loss)
-        
-        # Calculate take profit with 1:1.5 risk-reward ratio
-        if direction == 1:  # Buy
-            take_profit = entry_price + stop_loss_distance * 1.5  # 1:1.5 RR
-        else:  # Sell
-            take_profit = entry_price - stop_loss_distance * 1.5
-        
-        # Calculate position size using proper lot sizing
-        risk_amount = self.capital * (self.risk_per_trade / 100)
-        stop_loss_distance = abs(entry_price - stop_loss)
-        lot_size = self.calculate_lot_size(risk_amount, stop_loss_distance, entry_price)
-        
-        # Verify risk calculation
-        actual_risk = self.verify_risk_calculation(entry_price, stop_loss, lot_size, risk_amount)
-        
-        position = {
-            'id': len(self.trades_history) + 1,
-            'direction': direction,
-            'entry_price': entry_price,
-            'entry_time': datetime.now(),
-            'stop_loss': stop_loss,
-            'take_profit': take_profit,
-            'lot_size': lot_size,
-            'risk_amount': risk_amount,  # Store original risk amount
-            'actual_risk': actual_risk,  # Store actual calculated risk
-            'status': 'open'
-        }
-        
-        self.positions.append(position)
-        self.play_sound('trade_open')
-        self.add_particle_effect(entry_price, direction)
-        
-        print(f"🧠 HMM Strategy Trade: {'BUY' if direction == 1 else 'SELL'} at {entry_price:.2f}")
-        print(f"   SL: {stop_loss:.2f} (10-candle {'low' if direction == 1 else 'high'}) | TP: {take_profit:.2f}")
-        print(f"   Risk: {self.risk_per_trade}% (${risk_amount:.2f}) | Lot: {lot_size:.4f} | RR: 1:1.5")
-    
-    def generate_trade_signal(self):
-        """Generate a trading signal using strategy logic"""
-        if len(self.positions) < 3:  # Max 3 positions
-            # Use actual strategy if available
-            try:
-                signal = self.simulator.generate_signal()
-                if signal:
-                    self.execute_trade_from_signal(signal)
-                    return
-            except:
-                pass
-            
-            # Fallback to simulated signal
-            direction = np.random.choice([1, -1])
-            entry_price = self.current_price
-            
+        else:
+            # Signal from HMM state analysis (calculate our own SL)
             # Calculate stop loss based on last 10 candles (including signal candle)
             if len(self.ohlc_data) >= 10:
                 last_10_candles = list(self.ohlc_data)[-10:]  # Last 10 candles including current
@@ -1105,60 +1427,116 @@ class EnhancedTradingGUI:
             else:
                 # Fallback to ATR-based levels if not enough candles
                 recent_prices = [bar['close'] for bar in list(self.ohlc_data)[-20:]]
-                atr = np.std(recent_prices) if len(recent_prices) >= 20 else 100
+                atr = np.std(recent_prices) if len(recent_prices) >= 20 else entry_price * 0.02
                 
                 stop_loss_distance = atr * 1.5
-                
-                if direction == 1:  # Buy
+                if direction == 1:
                     stop_loss = entry_price - stop_loss_distance
-                else:  # Sell
+                else:
                     stop_loss = entry_price + stop_loss_distance
-            
-            # Calculate stop loss distance for TP calculation
-            stop_loss_distance = abs(entry_price - stop_loss)
-            
-            # Calculate take profit with 1:1.5 risk-reward ratio
-            if direction == 1:  # Buy
-                take_profit = entry_price + stop_loss_distance * 1.5
-            else:  # Sell
-                take_profit = entry_price - stop_loss_distance * 1.5
-            
-            # Calculate position size using proper lot sizing
-            risk_amount = self.capital * (self.risk_per_trade / 100)
-            stop_loss_distance = abs(entry_price - stop_loss)
-            lot_size = self.calculate_lot_size(risk_amount, stop_loss_distance, entry_price)
-            
-            position = {
-                'id': len(self.trades_history) + 1,
-                'direction': direction,
-                'entry_price': entry_price,
-                'entry_time': datetime.now(),
-                'stop_loss': stop_loss,
-                'take_profit': take_profit,
-                'lot_size': lot_size,
-                'risk_amount': risk_amount,  # Store original risk amount
-                'status': 'open'
-            }
-            
-            self.positions.append(position)
-            self.play_sound('trade_open')
-            
-            # Add particle effect
-            self.add_particle_effect(entry_price, direction)
-            
-            print(f"🚀 Position opened: {'BUY' if direction == 1 else 'SELL'} at {entry_price:.2f}")
+        
+        # Validate minimum stop loss distance
+        stop_loss_distance = abs(entry_price - stop_loss)
+        min_distance = self.get_minimum_sl_distance(entry_price)
+        
+        if stop_loss_distance < min_distance:
+            print(f"❌ HMM Trade rejected: SL too close ({stop_loss_distance:.5f} < {min_distance:.5f})")
+            print(f"   Entry: {entry_price:.5f} | SL: {stop_loss:.5f}")
+            print(f"   Market conditions not suitable for trading")
+            return  # Skip this trade
+        
+        # Capital validation removed - allow trading regardless of balance
+        
+        # Calculate take profit with 1:1.5 risk-reward ratio
+        if direction == 1:  # Buy
+            take_profit = entry_price + stop_loss_distance * 1.5  # 1:1.5 RR
+        else:  # Sell
+            take_profit = entry_price - stop_loss_distance * 1.5
+        
+        # Calculate position size using fixed risk amount
+        lot_size = self.calculate_lot_size(self.risk_amount, stop_loss_distance, entry_price)
+        
+        # Verify risk calculation
+        actual_risk = self.verify_risk_calculation(entry_price, stop_loss, lot_size, self.risk_amount)
+        
+        position = {
+            'id': len(self.trades_history) + 1,
+            'direction': direction,
+            'entry_price': entry_price,
+            'entry_time': datetime.now(),
+            'stop_loss': stop_loss,
+            'take_profit': take_profit,
+            'lot_size': lot_size,
+            'risk_amount': self.risk_amount,  # Store fixed risk amount
+            'actual_risk': actual_risk,  # Store actual calculated risk
+            'status': 'open'
+        }
+        
+        self.positions.append(position)
+        self.play_sound('trade_open')
+        self.add_particle_effect(entry_price, direction)
+        
+        # Verify Risk-Reward Ratio
+        tp_distance = abs(take_profit - entry_price)
+        actual_rr_ratio = tp_distance / stop_loss_distance
+        
+        # Get signal reason for display
+        signal_reason = signal.get('reason', 'HMM Strategy')
+        confidence = signal.get('confidence', 'N/A')
+        
+        print(f"🧠 {signal_reason}: {'BUY' if direction == 1 else 'SELL'} at {entry_price:.5f}")
+        if confidence != 'N/A':
+            print(f"   Confidence: {confidence:.2f}")
+        print(f"   SL: {stop_loss:.5f} (distance: {stop_loss_distance:.5f}) | TP: {take_profit:.5f}")
+        print(f"   TP Distance: {tp_distance:.5f} | Actual RR: 1:{actual_rr_ratio:.2f}")
+        print(f"   Risk: ${self.risk_amount:.2f} (fixed) | Lot: {lot_size:.4f}")
+        print(f"   SL validation: {stop_loss_distance:.5f} >= {min_distance:.5f} ✅")
+        
+        # Verify RR ratio is close to 1:1.5
+        if abs(actual_rr_ratio - 1.5) > 0.1:
+            print(f"⚠️ WARNING: Risk-Reward ratio is {actual_rr_ratio:.2f}, not 1.5!")
+    
+    def generate_trade_signal(self):
+        """Generate a trading signal using proper strategy logic (no random trades)"""
+        if len(self.positions) >= 2:  # Max 2 positions as per risk management
+            if len(self.ohlc_data) % 100 == 0:  # Only show message occasionally
+                print(f"⚠️ Maximum position limit reached (2/2) - skipping trade signals")
+            return
+        
+        # First try to use actual HMM strategy if available
+        try:
+            signal = self.simulator.generate_signal()
+            if signal and signal.get('signal', 0) != 0:
+                self.execute_trade_from_signal(signal)
+                return
+        except Exception as e:
+            print(f"⚠️ Strategy signal generation failed: {e}")
+        
+        # If no strategy signal, use the improved technical analysis
+        # This replaces the random fallback with proper analysis
+        self.generate_simplified_signal_from_ohlc()
     
     def execute_trade_from_signal(self, signal):
-        """Execute trade from actual strategy signal"""
+        """Execute trade from actual strategy signal with validation"""
         direction = signal['signal']
         entry_price = self.current_price
         
-        # Calculate position size using proper lot sizing
+        # Calculate stop loss and take profit from signal
         spec = self.get_contract_spec()
         stop_loss_price = entry_price - (signal['stop_loss_pips'] * spec['pip_size'] * direction)
-        risk_amount = self.capital * (self.risk_per_trade / 100)
         stop_loss_distance = abs(entry_price - stop_loss_price)
-        lot_size = self.calculate_lot_size(risk_amount, stop_loss_distance, entry_price)
+        
+        # Validate minimum stop loss distance
+        min_distance = self.get_minimum_sl_distance(entry_price)
+        
+        if stop_loss_distance < min_distance:
+            print(f"❌ Signal Trade rejected: SL too close ({stop_loss_distance:.5f} < {min_distance:.5f})")
+            return  # Skip this trade
+        
+        # Capital validation removed - allow trading regardless of balance
+        
+        # Calculate position size using fixed risk amount
+        lot_size = self.calculate_lot_size(self.risk_amount, stop_loss_distance, entry_price)
         
         position = {
             'id': len(self.trades_history) + 1,
@@ -1168,13 +1546,89 @@ class EnhancedTradingGUI:
             'stop_loss': stop_loss_price,
             'take_profit': entry_price + (signal['take_profit_pips'] * spec['pip_size'] * direction),
             'lot_size': lot_size,
-            'risk_amount': risk_amount,  # Store original risk amount
+            'risk_amount': self.risk_amount,  # Store fixed risk amount
             'status': 'open'
         }
         
         self.positions.append(position)
         self.play_sound('trade_open')
         self.add_particle_effect(entry_price, direction)
+        
+        print(f"📡 Signal Trade: {'BUY' if direction == 1 else 'SELL'} at {entry_price:.5f}")
+        print(f"   SL: {stop_loss_price:.5f} (distance: {stop_loss_distance:.5f})")
+        print(f"   Risk: ${self.risk_amount:.2f} (fixed) | Lot: {lot_size:.4f}")
+        print(f"   SL validation: {stop_loss_distance:.5f} >= {min_distance:.5f} ✅")
+    
+    def validate_sl_placement(self, position):
+        """Validate that stop loss is placed correctly relative to current price - READ ONLY"""
+        if position['status'] != 'open':
+            return True
+        
+        current_price = self.current_price
+        stop_loss = position['stop_loss']
+        direction = position['direction']
+        
+        # FIXED SL/TP SYSTEM: Only validate, NEVER modify SL/TP levels
+        # This prevents SL from changing when price gets close
+        
+        # Check if SL is on the correct side of current price (for monitoring only)
+        if direction == 1:  # Long position (BUY)
+            # SL must be BELOW current price
+            if stop_loss >= current_price:
+                print(f"⚠️ NOTICE: Long position SL ({stop_loss:.5f}) is above/at current price ({current_price:.5f})")
+                print(f"   Position will close when price hits SL level (FIXED SL/TP system)")
+                # DO NOT MODIFY SL - let it close naturally
+                return False
+                
+        else:  # Short position (SELL)
+            # SL must be ABOVE current price
+            if stop_loss <= current_price:
+                print(f"⚠️ NOTICE: Short position SL ({stop_loss:.5f}) is below/at current price ({current_price:.5f})")
+                print(f"   Position will close when price hits SL level (FIXED SL/TP system)")
+                # DO NOT MODIFY SL - let it close naturally
+                return False
+        
+        return True
+    
+    def monitor_all_positions(self):
+        """Monitor all positions for SL/TP status (READ-ONLY - no modifications)"""
+        if not self.positions:
+            return
+        
+        print(f"🔍 Monitoring {len(self.positions)} positions (FIXED SL/TP system)...")
+        
+        for i, position in enumerate(self.positions):
+            if position['status'] == 'open':
+                print(f"   Position {i+1}: {('BUY' if position['direction'] == 1 else 'SELL')} @ {position['entry_price']:.5f}")
+                print(f"      Current Price: {self.current_price:.5f}")
+                print(f"      Stop Loss: {position['stop_loss']:.5f} (FIXED)")
+                print(f"      Take Profit: {position['take_profit']:.5f} (FIXED)")
+                
+                # Calculate distances for monitoring
+                sl_distance = abs(self.current_price - position['stop_loss'])
+                tp_distance = abs(self.current_price - position['take_profit'])
+                
+                # Show how close we are to SL/TP
+                print(f"      Distance to SL: {sl_distance:.5f}")
+                print(f"      Distance to TP: {tp_distance:.5f}")
+                
+                # Calculate unrealized P&L
+                lot_size = position.get('lot_size', 0.01)
+                unrealized_pnl = self.calculate_pnl_silent(
+                    position['entry_price'], 
+                    self.current_price, 
+                    lot_size, 
+                    position['direction']
+                )
+                print(f"      Unrealized P&L: ${unrealized_pnl:+.2f}")
+                
+                # Show Risk-Reward status
+                entry_to_sl = abs(position['entry_price'] - position['stop_loss'])
+                entry_to_tp = abs(position['entry_price'] - position['take_profit'])
+                rr_ratio = entry_to_tp / entry_to_sl if entry_to_sl > 0 else 0
+                print(f"      Risk-Reward: 1:{rr_ratio:.2f}")
+                
+                print()  # Empty line for readability
     
     def add_particle_effect(self, price, direction):
         """Add particle effect for trade execution"""
@@ -1189,12 +1643,23 @@ class EnhancedTradingGUI:
         self.particle_effects.append(effect)
     
     def update_positions(self):
-        """Update positions with enhanced effects"""
+        """Update positions with enhanced effects and fixed SL/TP levels"""
         closed_positions = []
         
         for position in self.positions:
             if position['status'] == 'open':
-                # Check exit conditions
+                # Calculate current unrealized P&L for display purposes
+                current_pnl = self.calculate_pnl(
+                    position['entry_price'], 
+                    self.current_price, 
+                    position.get('lot_size', 0.01), 
+                    position['direction']
+                )
+                
+                # Using fixed SL/TP levels (no trailing stops) for consistent and predictable P&L
+                # SL/TP levels are NEVER modified after position creation
+                
+                # Check exit conditions (no SL validation to prevent interference)
                 hit_sl = (position['direction'] == 1 and self.current_price <= position['stop_loss']) or \
                         (position['direction'] == -1 and self.current_price >= position['stop_loss'])
                 
@@ -1202,23 +1667,48 @@ class EnhancedTradingGUI:
                         (position['direction'] == -1 and self.current_price <= position['take_profit'])
                 
                 if hit_sl or hit_tp:
-                    # Close position
-                    position['exit_price'] = self.current_price
+                    # Close position - use correct exit price
+                    if hit_sl:
+                        position['exit_price'] = position['stop_loss']
+                        exit_price_for_pnl = position['stop_loss']
+                    else:  # hit_tp
+                        position['exit_price'] = position['take_profit']
+                        exit_price_for_pnl = position['take_profit']
+                    
                     position['exit_time'] = datetime.now()
                     position['status'] = 'closed'
                     
-                    # Calculate P&L using proper contract specifications
+                    # Calculate P&L using proper exit price (SL or TP, not current price)
                     lot_size = position.get('lot_size', 0.01)  # Default to minimum lot size if not found
                     position['pnl'] = self.calculate_pnl(
                         position['entry_price'], 
-                        self.current_price, 
+                        exit_price_for_pnl, 
                         lot_size, 
                         position['direction']
                     )
                     
                     # Update capital with P&L
                     old_capital = self.capital
+                    
+                    # Debug: Show detailed calculation before updating
+                    print(f"🔍 BALANCE UPDATE DEBUG:")
+                    print(f"   Old Capital: ${old_capital:.2f}")
+                    print(f"   Position P&L: ${position['pnl']:+.2f}")
+                    print(f"   Calculation: ${old_capital:.2f} + ${position['pnl']:+.2f} = ${old_capital + position['pnl']:.2f}")
+                    
                     self.capital += position['pnl']
+                    
+                    print(f"   New Capital: ${self.capital:.2f}")
+                    print(f"   Balance Change: ${self.capital - old_capital:+.2f}")
+                    
+                    # Additional check: verify the capital variable is actually changing
+                    if abs(self.capital - old_capital) < 0.01:
+                        print(f"❌ CRITICAL: Capital did not change! Old: ${old_capital:.2f}, New: ${self.capital:.2f}")
+                        print(f"   P&L was: ${position['pnl']:+.2f}")
+                        print(f"   This suggests the += operation failed!")
+                    else:
+                        print(f"✅ Capital variable updated successfully")
+                    
                     closed_positions.append(position)
                     
                     # Play sound and add effect
@@ -1226,10 +1716,57 @@ class EnhancedTradingGUI:
                     self.add_particle_effect(self.current_price, position['direction'])
                     
                     exit_reason = 'TP' if hit_tp else 'SL'
-                    print(f"💰 Position closed: {exit_reason}")
-                    print(f"   P&L: ${position['pnl']:.2f}")
+                    pnl_type = "PROFIT" if position['pnl'] > 0 else "LOSS"
+                    
+                    print(f"💰 Position closed: {exit_reason} ({pnl_type})")
+                    print(f"   Entry: {position['entry_price']:.5f} | Exit: {position['exit_price']:.5f}")
+                    print(f"   Current Price: {self.current_price:.5f}")
+                    print(f"   Direction: {'BUY' if position['direction'] == 1 else 'SELL'}")
+                    print(f"   P&L: ${position['pnl']:+.2f}")
                     print(f"   Capital: ${old_capital:.2f} → ${self.capital:.2f}")
-                    print(f"   Lot Size: {lot_size}")
+                    print(f"   Lot Size: {lot_size:.4f}")
+                    
+                    # Verify the balance change is correct
+                    expected_capital = old_capital + position['pnl']
+                    if abs(self.capital - expected_capital) > 0.01:
+                        print(f"❌ BALANCE ERROR: Expected ${expected_capital:.2f}, got ${self.capital:.2f}")
+                    else:
+                        balance_change = self.capital - old_capital
+                        print(f"✅ Balance change: ${balance_change:+.2f} (correct)")
+                    
+                    # Additional verification for stop loss hits
+                    if hit_sl:
+                        # Manual verification of SL P&L calculation
+                        entry = position['entry_price']
+                        exit = position['exit_price']
+                        direction = position['direction']
+                        
+                        # For SL hits, P&L should always be negative (loss)
+                        expected_negative = True
+                        if direction == 1:  # Long position
+                            # SL should be below entry, so exit < entry = negative P&L
+                            expected_negative = exit < entry
+                        else:  # Short position  
+                            # SL should be above entry, so exit > entry = negative P&L
+                            expected_negative = exit > entry
+                        
+                        if position['pnl'] > 0:
+                            print(f"⚠️ WARNING: Stop loss hit but P&L is positive!")
+                            print(f"   This suggests an error in SL placement or P&L calculation")
+                            print(f"   Entry: {entry:.5f} | SL Exit: {exit:.5f} | Direction: {direction}")
+                        elif not expected_negative:
+                            print(f"⚠️ WARNING: SL price relationship seems wrong!")
+                            print(f"   Entry: {entry:.5f} | SL Exit: {exit:.5f} | Direction: {direction}")
+                        else:
+                            print(f"✅ Stop loss hit with negative P&L as expected")
+                            
+                        # Calculate expected loss based on risk amount
+                        expected_loss = -position.get('risk_amount', self.risk_amount)
+                        actual_loss = position['pnl']
+                        loss_accuracy = (actual_loss / expected_loss) * 100 if expected_loss != 0 else 0
+                        
+                        print(f"   Expected Loss: ${expected_loss:.2f} | Actual Loss: ${actual_loss:.2f}")
+                        print(f"   Loss Accuracy: {loss_accuracy:.1f}% of expected")
         
         # Remove closed positions
         for pos in closed_positions:
@@ -1486,15 +2023,13 @@ class EnhancedTradingGUI:
             for pos in self.positions:
                 if pos['status'] == 'open':
                     lot_size = pos.get('lot_size', 0.01)
-                    unrealized_pnl = self.calculate_pnl(
+                    unrealized_pnl = self.calculate_pnl_silent(
                         pos['entry_price'], 
                         self.current_price, 
                         lot_size, 
                         pos['direction']
                     )
                     total_unrealized_pnl += unrealized_pnl
-                    
-                    # Calculate unrealized P&L for display
             
             self.pnl_label.config(text=f"${total_unrealized_pnl:+,.2f}")
             if total_unrealized_pnl > 0:
@@ -1519,8 +2054,18 @@ class EnhancedTradingGUI:
         # Trade count
         self.trades_label.config(text=str(len(self.trades_history)))
         
-        # Active positions
-        self.positions_label.config(text=str(len(self.positions)))
+        # Active positions with limit indicator
+        position_count = len(self.positions)
+        max_positions = 2
+        self.positions_label.config(text=f"{position_count}/{max_positions}")
+        
+        # Change color based on position count
+        if position_count >= max_positions:
+            self.positions_label.config(style='Loss.TLabel')  # Red when at limit
+        elif position_count > 0:
+            self.positions_label.config(style='Neon.TLabel')  # Normal when active
+        else:
+            self.positions_label.config(style='Neon.TLabel')  # Normal when empty
         
         # Total realized P&L
         total_realized_pnl = self.capital - self.initial_capital
@@ -1537,6 +2082,12 @@ class EnhancedTradingGUI:
             current_state = self.hmm_states[-1]
             state_names = ['BEARISH', 'NEUTRAL', 'BULLISH']
             self.state_label.config(text=state_names[current_state])
+        else:
+            # Show if strategy is being initialized
+            if hasattr(self.simulator, 'strategy') and self.simulator.strategy is None:
+                self.state_label.config(text="TRAINING...")
+            else:
+                self.state_label.config(text="ANALYZING...")
         
         # Progress and Status
         if self.is_simulating and self.historical_data is not None:
@@ -1559,7 +2110,7 @@ class EnhancedTradingGUI:
             
             # Calculate unrealized P&L using proper contract specifications
             lot_size = pos.get('lot_size', 0.01)  # Default to minimum lot size if not found
-            unrealized_pnl = self.calculate_pnl(
+            unrealized_pnl = self.calculate_pnl_silent(
                 pos['entry_price'], 
                 self.current_price, 
                 lot_size, 
@@ -1698,11 +2249,44 @@ class EnhancedTradingGUI:
         """Handle trading symbol change"""
         new_symbol = self.symbol_var.get()
         if new_symbol != self.trading_symbol:
+            old_symbol = self.trading_symbol
             self.trading_symbol = new_symbol
-            print(f"📊 Trading symbol changed to: {self.trading_symbol}")
+            print(f"📊 Trading symbol changed: {old_symbol} → {self.trading_symbol}")
+            
+            # Reinitialize simulator with new symbol
+            print("🔄 Reinitializing strategy for new symbol...")
+            self.init_simulator()
+            
+            # Reinitialize strategy in background for new symbol
+            def reinit_strategy():
+                try:
+                    print(f"🔄 Training HMM strategy for {self.trading_symbol}...")
+                    # Update status to show retraining
+                    if hasattr(self, 'status_label'):
+                        self.status_label.config(text=f"TRAINING {self.trading_symbol}")
+                    
+                    self.simulator.initialize_strategy()
+                    print(f"✅ Strategy retrained for {self.trading_symbol}")
+                    
+                    # Update status back to ready
+                    if hasattr(self, 'status_label'):
+                        self.status_label.config(text="READY")
+                        
+                except Exception as e:
+                    print(f"❌ Strategy retraining failed for {self.trading_symbol}: {e}")
+                    print("🔄 Will use simplified trading logic as fallback")
+                    if hasattr(self.simulator, 'strategy'):
+                        self.simulator.strategy = None
+                    
+                    # Update status to show fallback
+                    if hasattr(self, 'status_label'):
+                        self.status_label.config(text="FALLBACK MODE")
+            
+            threading.Thread(target=reinit_strategy, daemon=True).start()
             
             # Reset simulation if running
             if self.is_running:
+                print("🔄 Resetting simulation for new symbol...")
                 self.reset_simulation()
     
     def on_timeframe_change(self, event=None):
@@ -1729,34 +2313,43 @@ class EnhancedTradingGUI:
                 self.balance_var.set(str(self.custom_balance))
                 return
             
-            # Validate and save risk
-            new_risk = float(self.risk_var.get())
-            if not (0.1 <= new_risk <= 10.0):
-                self.settings_status_label.config(text="❌ Risk must be 0.1% - 10%", foreground=self.colors['neon_red'])
-                self.risk_var.set(str(self.risk_per_trade))
+            # Validate and save risk amount (fixed USD amount)
+            new_risk_amount = float(self.risk_var.get())
+            if new_risk_amount <= 0:
+                self.settings_status_label.config(text="❌ Risk amount must be positive", foreground=self.colors['neon_red'])
+                self.risk_var.set(str(self.risk_amount))
+                return
+            
+            # Check if risk amount is reasonable compared to balance
+            risk_percentage = (new_risk_amount / new_balance) * 100
+            if risk_percentage > 10:
+                self.settings_status_label.config(text=f"❌ Risk too high ({risk_percentage:.1f}% of balance)", foreground=self.colors['neon_red'])
+                self.risk_var.set(str(self.risk_amount))
                 return
             
             # Apply changes
             old_balance = self.custom_balance
-            old_risk = self.risk_per_trade
+            old_risk_amount = self.risk_amount
             
             self.custom_balance = new_balance
             self.capital = new_balance
             self.initial_capital = new_balance
-            self.risk_per_trade = new_risk
+            self.risk_amount = new_risk_amount
             
             # Update displays
             self.current_balance_label.config(text=f"${self.custom_balance:.2f}")
-            self.current_risk_label.config(text=f"{self.risk_per_trade}%")
+            self.current_risk_label.config(text=f"${self.risk_amount:.2f}")
             self.update_stats()
             self.root.update_idletasks()
             
             # Show success message
-            self.settings_status_label.config(text="✅ Settings Saved!", foreground=self.colors['neon_green'])
+            risk_percentage = (self.risk_amount / self.capital) * 100
+            self.settings_status_label.config(text=f"✅ Settings Saved! ({risk_percentage:.1f}% risk)", foreground=self.colors['neon_green'])
             
             print(f"💾 Settings Saved:")
             print(f"   Balance: ${old_balance:.2f} → ${new_balance:.2f}")
-            print(f"   Risk: {old_risk}% → {new_risk}%")
+            print(f"   Risk Amount: ${old_risk_amount:.2f} → ${new_risk_amount:.2f}")
+            print(f"   Risk Percentage: {risk_percentage:.1f}% of balance")
             
             # Reset simulation if running
             if self.is_running:
@@ -1769,12 +2362,36 @@ class EnhancedTradingGUI:
         except ValueError:
             self.settings_status_label.config(text="❌ Invalid number format", foreground=self.colors['neon_red'])
             self.balance_var.set(str(self.custom_balance))
-            self.risk_var.set(str(self.risk_per_trade))
+            self.risk_var.set(str(self.risk_amount))
     
     def on_risk_change(self, event=None):
         """Handle risk per trade change (deprecated - use save button)"""
         # This function is now mainly for display purposes
         pass
+    
+    def test_balance_update(self):
+        """Test balance update functionality"""
+        print("🧪 TESTING BALANCE UPDATE:")
+        print(f"   Current Balance: ${self.capital:.2f}")
+        
+        # Test 1: Simulate a $10 loss
+        old_balance = self.capital
+        test_loss = -10.0
+        self.capital += test_loss
+        
+        print(f"   Test Loss: ${test_loss:.2f}")
+        print(f"   New Balance: ${self.capital:.2f}")
+        print(f"   Change: ${self.capital - old_balance:+.2f}")
+        
+        if abs((self.capital - old_balance) - test_loss) < 0.01:
+            print("   ✅ Balance update working correctly!")
+        else:
+            print("   ❌ Balance update failed!")
+        
+        # Update the GUI display
+        self.update_stats()
+        
+        print("   Check the GUI - balance should have decreased by $10")
     
     def toggle_auto_strategy(self):
         """Toggle automatic strategy mode"""
@@ -1815,39 +2432,46 @@ class EnhancedTradingGUI:
         if stop_loss_distance <= 0:
             return 0.01  # Minimum lot size
         
-        # PROPER RISK MANAGEMENT FORMULA:
-        # Position Size = Risk Amount / Stop Loss Distance
-        # This ensures that if SL is hit, loss = exactly the risk amount
+        # CORRECTED RISK MANAGEMENT FORMULA:
+        # We need to account for the contract size in the lot size calculation
+        # Risk Amount = Stop Loss Distance * Lot Size * Contract Size
+        # Therefore: Lot Size = Risk Amount / (Stop Loss Distance * Contract Size)
         
-        position_size = risk_amount / stop_loss_distance
-        
-        # Convert position size to lot size based on symbol type
         if self.trading_symbol in ['BTCUSD', 'BTCUSDm']:
-            # For Bitcoin: 1 lot = 1 BTC, so position size IS the lot size
-            lot_size = position_size
+            # For Bitcoin: 1 lot = 1 BTC, contract size = 1
+            contract_size = 1
+            lot_size = risk_amount / (stop_loss_distance * contract_size)
         elif self.trading_symbol in ['ETHUSD', 'ETHUSDm']:
-            # For Ethereum: 1 lot = 1 ETH, so position size IS the lot size  
-            lot_size = position_size
+            # For Ethereum: 1 lot = 1 ETH, contract size = 1
+            contract_size = 1
+            lot_size = risk_amount / (stop_loss_distance * contract_size)
         elif self.trading_symbol in ['XAUUSDm']:
-            # For Gold: 1 lot = 100 oz, so divide by 100
-            lot_size = position_size / 100
+            # For Gold: 1 lot = 100 oz, contract size = 100
+            contract_size = 100
+            lot_size = risk_amount / (stop_loss_distance * contract_size)
         else:
-            # For forex: 1 lot = 100,000 units, so divide by 100,000
-            lot_size = position_size / 100000
+            # For forex: 1 lot = 100,000 units, contract size = 100,000
+            contract_size = 100000
+            lot_size = risk_amount / (stop_loss_distance * contract_size)
         
-        # Ensure reasonable lot size range (but don't cap too aggressively)
-        lot_size = max(0.001, min(10.0, lot_size))  # Allow up to 10 lots
+        # Ensure reasonable lot size range
+        lot_size = max(0.001, min(10.0, lot_size))
         
         # Round to appropriate decimal places
         lot_size = round(lot_size, 4)
         
+        # Verify the calculation
+        expected_loss = stop_loss_distance * lot_size * contract_size
+        
         # Debug output to verify calculations
-        print(f"💰 Risk Calculation:")
+        print(f"💰 CORRECTED Risk Calculation:")
+        print(f"   Symbol: {self.trading_symbol}")
         print(f"   Risk Amount: ${risk_amount:.2f}")
-        print(f"   SL Distance: {stop_loss_distance:.2f}")
-        print(f"   Position Size: {position_size:.2f}")
-        print(f"   Lot Size: {lot_size:.4f}")
-        print(f"   Expected Loss if SL hit: ${stop_loss_distance * lot_size:.2f}")
+        print(f"   SL Distance: {stop_loss_distance:.5f}")
+        print(f"   Contract Size: {contract_size}")
+        print(f"   Lot Size: {lot_size:.6f}")
+        print(f"   Expected Loss if SL hit: ${expected_loss:.2f}")
+        print(f"   Risk Accuracy: {(expected_loss/risk_amount)*100:.1f}%")
         
         return lot_size
     
@@ -1859,24 +2483,57 @@ class EnhancedTradingGUI:
         # PROPER P&L CALCULATION:
         # P&L = Price Difference * Lot Size * Contract Size
         
+        print(f"📊 DETAILED P&L Calculation:")
+        print(f"   Symbol: {self.trading_symbol}")
+        print(f"   Entry: {entry_price:.5f} | Exit: {exit_price:.5f}")
+        print(f"   Direction: {direction} ({'BUY' if direction == 1 else 'SELL'})")
+        print(f"   Raw Price Diff: {exit_price - entry_price:.5f}")
+        print(f"   Directional Price Diff: {price_diff:.5f}")
+        print(f"   Lot Size: {lot_size:.6f}")
+        
         if self.trading_symbol in ['BTCUSD', 'BTCUSDm']:
             # For Bitcoin: 1 lot = 1 BTC, P&L = price_diff * lot_size
             pnl = price_diff * lot_size
+            print(f"   Bitcoin calculation: {price_diff:.5f} * {lot_size:.6f} = ${pnl:.2f}")
         elif self.trading_symbol in ['ETHUSD', 'ETHUSDm']:
             # For Ethereum: 1 lot = 1 ETH, P&L = price_diff * lot_size
             pnl = price_diff * lot_size
+            print(f"   Ethereum calculation: {price_diff:.5f} * {lot_size:.6f} = ${pnl:.2f}")
         elif self.trading_symbol in ['XAUUSDm']:
             # For Gold: 1 lot = 100 oz, P&L = price_diff * lot_size * 100
             pnl = price_diff * lot_size * 100
+            print(f"   Gold calculation: {price_diff:.5f} * {lot_size:.6f} * 100 = ${pnl:.2f}")
         else:
             # For forex: 1 lot = 100,000 units, P&L = price_diff * lot_size * 100,000
             pnl = price_diff * lot_size * 100000
+            print(f"   Forex calculation: {price_diff:.5f} * {lot_size:.6f} * 100,000 = ${pnl:.2f}")
         
-        # Debug output to verify P&L calculation
-        print(f"📊 P&L Calculation:")
-        print(f"   Entry: {entry_price:.2f} | Exit: {exit_price:.2f}")
-        print(f"   Price Diff: {price_diff:.2f} | Lot Size: {lot_size:.4f}")
-        print(f"   P&L: ${pnl:.2f}")
+        print(f"   Final P&L: ${pnl:+.2f}")
+        
+        # Sanity check for stop loss
+        if price_diff < 0 and pnl > 0:
+            print(f"❌ ERROR: Negative price movement but positive P&L!")
+        elif price_diff > 0 and pnl < 0:
+            print(f"❌ ERROR: Positive price movement but negative P&L!")
+        else:
+            print(f"✅ P&L direction matches price movement")
+        
+        return pnl
+    
+    def calculate_pnl_silent(self, entry_price, exit_price, lot_size, direction):
+        """Calculate P&L without debug output (for UI updates)"""
+        # Price difference in the direction of the trade
+        price_diff = (exit_price - entry_price) * direction
+        
+        # Calculate P&L based on symbol type
+        if self.trading_symbol in ['BTCUSD', 'BTCUSDm']:
+            pnl = price_diff * lot_size
+        elif self.trading_symbol in ['ETHUSD', 'ETHUSDm']:
+            pnl = price_diff * lot_size
+        elif self.trading_symbol in ['XAUUSDm']:
+            pnl = price_diff * lot_size * 100
+        else:
+            pnl = price_diff * lot_size * 100000
         
         return pnl
     
@@ -1884,29 +2541,94 @@ class EnhancedTradingGUI:
         """Verify that the risk calculation is correct"""
         stop_loss_distance = abs(entry_price - stop_loss)
         
-        # Calculate what the actual loss would be if SL is hit
+        # Calculate what the actual loss would be if SL is hit using same logic as lot size calculation
         if self.trading_symbol in ['BTCUSD', 'BTCUSDm']:
-            actual_loss = stop_loss_distance * lot_size
+            contract_size = 1
+            actual_loss = stop_loss_distance * lot_size * contract_size
         elif self.trading_symbol in ['ETHUSD', 'ETHUSDm']:
-            actual_loss = stop_loss_distance * lot_size
+            contract_size = 1
+            actual_loss = stop_loss_distance * lot_size * contract_size
         elif self.trading_symbol in ['XAUUSDm']:
-            actual_loss = stop_loss_distance * lot_size * 100
+            contract_size = 100
+            actual_loss = stop_loss_distance * lot_size * contract_size
         else:
-            actual_loss = stop_loss_distance * lot_size * 100000
+            contract_size = 100000
+            actual_loss = stop_loss_distance * lot_size * contract_size
         
-        risk_accuracy = (actual_loss / risk_amount) * 100
+        risk_accuracy = (actual_loss / risk_amount) * 100 if risk_amount > 0 else 0
         
         print(f"🔍 Risk Verification:")
         print(f"   Target Risk: ${risk_amount:.2f}")
         print(f"   Actual Risk: ${actual_loss:.2f}")
         print(f"   Accuracy: {risk_accuracy:.1f}%")
+        print(f"   Contract Size: {contract_size}")
         
-        if abs(risk_accuracy - 100) > 5:  # More than 5% off
+        if abs(risk_accuracy - 100) > 10:  # More than 10% off
             print(f"⚠️ WARNING: Risk calculation is {risk_accuracy:.1f}% of target!")
         else:
             print(f"✅ Risk calculation is accurate!")
         
         return actual_loss
+    
+    def get_minimum_sl_distance(self, entry_price):
+        """Calculate minimum stop loss distance based on symbol and timeframe"""
+        timeframe_str = self.timeframe_var.get()
+        
+        # Base minimum distance as percentage of price
+        if self.trading_symbol in ['BTCUSD', 'BTCUSDm']:
+            # Bitcoin - higher volatility, larger minimum distances
+            base_distances = {
+                "M1": 0.0015,   # 0.15% for M1
+                "M5": 0.002,    # 0.2% for M5
+                "M15": 0.0025,  # 0.25% for M15
+                "M30": 0.003,   # 0.3% for M30
+                "H1": 0.004     # 0.4% for H1
+            }
+        elif self.trading_symbol in ['ETHUSD', 'ETHUSDm']:
+            # Ethereum - moderate volatility
+            base_distances = {
+                "M1": 0.001,    # 0.1% for M1
+                "M5": 0.0015,   # 0.15% for M5
+                "M15": 0.002,   # 0.2% for M15
+                "M30": 0.0025,  # 0.25% for M30
+                "H1": 0.003     # 0.3% for H1
+            }
+        elif self.trading_symbol in ['XAUUSDm']:
+            # Gold - moderate volatility
+            base_distances = {
+                "M1": 0.0008,   # 0.08% for M1
+                "M5": 0.001,    # 0.1% for M5
+                "M15": 0.0015,  # 0.15% for M15
+                "M30": 0.002,   # 0.2% for M30
+                "H1": 0.0025    # 0.25% for H1
+            }
+        else:
+            # Forex pairs - lower volatility, smaller distances
+            base_distances = {
+                "M1": 0.0005,   # 0.05% for M1
+                "M5": 0.0008,   # 0.08% for M5
+                "M15": 0.001,   # 0.1% for M15
+                "M30": 0.0015,  # 0.15% for M30
+                "H1": 0.002     # 0.2% for H1
+            }
+        
+        base_percentage = base_distances.get(timeframe_str, 0.001)
+        min_distance = entry_price * base_percentage
+        
+        # Also consider recent volatility
+        if len(self.ohlc_data) >= 20:
+            recent_ranges = []
+            for bar in list(self.ohlc_data)[-20:]:
+                bar_range = bar['high'] - bar['low']
+                recent_ranges.append(bar_range)
+            
+            avg_range = np.mean(recent_ranges)
+            volatility_based_min = avg_range * 0.5  # 50% of average range
+            
+            # Use the larger of the two minimums
+            min_distance = max(min_distance, volatility_based_min)
+        
+        return min_distance
     
     def price_to_pips(self, price_distance):
         """Convert price distance to pips"""
