@@ -578,18 +578,27 @@ class EnhancedTradingGUI:
                         self.time_data.append(row.name)
                         self.current_price = row['Close']
                         
-                        # Simulate HMM state (you could integrate real HMM here)
-                        state = np.random.randint(0, 3)
-                        self.hmm_states.append(state)
-                        self.state_probabilities.append([np.random.random(), np.random.random(), np.random.random()])
+                        # Get real HMM state from strategy (update every 5 bars for performance)
+                        if self.current_bar_index % 5 == 0:
+                            state, state_probs = self.get_real_hmm_state()
+                            self.hmm_states.append(state)
+                            self.state_probabilities.append(state_probs)
+                        else:
+                            # Use last known state for intermediate bars
+                            if self.hmm_states:
+                                self.hmm_states.append(self.hmm_states[-1])
+                                self.state_probabilities.append(self.state_probabilities[-1])
+                            else:
+                                # First time - get initial state
+                                state, state_probs = self.get_real_hmm_state()
+                                self.hmm_states.append(state)
+                                self.state_probabilities.append(state_probs)
                         
                         # Generate trading signals using real HMM strategy (less frequently)
                         if len(self.ohlc_data) > 50 and self.current_bar_index % 10 == 0:  # Every 10 bars
                             self.generate_hmm_trade_signal()
                         
-                        # Fallback: Generate simple trades occasionally for testing
-                        if len(self.ohlc_data) > 20 and len(self.positions) < 2 and self.current_bar_index % 25 == 0:
-                            self.generate_simple_test_trade()
+
                         
                         # Update positions
                         self.update_positions()
@@ -651,13 +660,13 @@ class EnhancedTradingGUI:
                     else:
                         print("❌ No MT5 connection for live data")
                     
-                    # Simulate HMM state
-                    state = np.random.randint(0, 3)
+                    # Get real HMM state from strategy
+                    state, state_probs = self.get_real_hmm_state()
                     self.hmm_states.append(state)
-                    self.state_probabilities.append([np.random.random(), np.random.random(), np.random.random()])
+                    self.state_probabilities.append(state_probs)
                     
-                    # Generate trading signals - increased probability
-                    if len(self.ohlc_data) > 20 and np.random.random() < 0.1:  # 10% chance
+                    # Generate trading signals - deterministic based on data
+                    if len(self.ohlc_data) > 20:
                         self.generate_trade_signal()
                     
                     # Update positions
@@ -694,6 +703,150 @@ class EnhancedTradingGUI:
         # Start animation - faster updates for smoother rendering
         self.animation = FuncAnimation(self.fig, self.update_charts, interval=500, blit=False)
     
+    def get_real_hmm_state(self):
+        """Get real HMM state from the strategy or calculate market regime"""
+        # First try to get real HMM state from strategy
+        try:
+            if hasattr(self.simulator, 'strategy') and self.simulator.strategy:
+                # Try to get the current HMM state from the strategy
+                if hasattr(self.simulator.strategy, 'hmm_model') and self.simulator.strategy.hmm_model:
+                    # Convert OHLC data to DataFrame for strategy
+                    if len(self.ohlc_data) >= 50:  # Need enough data for HMM
+                        recent_data = list(self.ohlc_data)[-50:]  # Last 50 bars
+                        df_data = {
+                            'Open': [bar['open'] for bar in recent_data],
+                            'High': [bar['high'] for bar in recent_data],
+                            'Low': [bar['low'] for bar in recent_data],
+                            'Close': [bar['close'] for bar in recent_data],
+                            'Volume': [bar['volume'] for bar in recent_data]
+                        }
+                        df = pd.DataFrame(df_data)
+                        
+                        # Get features and predict state
+                        features = self.simulator.strategy.prepare_features(df)
+                        if len(features) > 0:
+                            # Get the most recent state prediction
+                            states = self.simulator.strategy.hmm_model.predict(features)
+                            current_state = states[-1]
+                            
+                            # Get state probabilities
+                            state_probs = self.simulator.strategy.hmm_model.predict_proba(features)
+                            current_probs = state_probs[-1].tolist()
+                            
+                            print(f"🧠 Real HMM State: {current_state} | Probs: {[f'{p:.2f}' for p in current_probs]}")
+                            return current_state, current_probs
+        except Exception as e:
+            print(f"⚠️ Could not get real HMM state: {e}")
+        
+        # Fallback: Calculate market regime based on price action
+        return self.calculate_market_regime()
+    
+    def calculate_market_regime(self):
+        """Calculate market regime based on price action and technical indicators"""
+        if len(self.ohlc_data) < 20:
+            return 1, [0.33, 0.34, 0.33]  # Neutral if not enough data
+        
+        # Get recent price data
+        recent_closes = [bar['close'] for bar in list(self.ohlc_data)[-20:]]
+        recent_highs = [bar['high'] for bar in list(self.ohlc_data)[-20:]]
+        recent_lows = [bar['low'] for bar in list(self.ohlc_data)[-20:]]
+        
+        current_price = recent_closes[-1]
+        
+        # Calculate technical indicators
+        sma_10 = np.mean(recent_closes[-10:])
+        sma_20 = np.mean(recent_closes)
+        
+        # Calculate price momentum
+        price_change_5 = (current_price - recent_closes[-6]) / recent_closes[-6] if len(recent_closes) >= 6 else 0
+        price_change_10 = (current_price - recent_closes[-11]) / recent_closes[-11] if len(recent_closes) >= 11 else 0
+        
+        # Calculate volatility (ATR-like)
+        ranges = [(recent_highs[i] - recent_lows[i]) for i in range(len(recent_highs))]
+        avg_range = np.mean(ranges[-10:])
+        current_range = recent_highs[-1] - recent_lows[-1]
+        volatility_ratio = current_range / avg_range if avg_range > 0 else 1
+        
+        # Calculate RSI
+        price_changes = np.diff(recent_closes)
+        gains = np.where(price_changes > 0, price_changes, 0)
+        losses = np.where(price_changes < 0, -price_changes, 0)
+        
+        if len(gains) >= 14:
+            avg_gain = np.mean(gains[-14:])
+            avg_loss = np.mean(losses[-14:])
+            if avg_loss > 0:
+                rs = avg_gain / avg_loss
+                rsi = 100 - (100 / (1 + rs))
+            else:
+                rsi = 100
+        else:
+            rsi = 50
+        
+        # Determine market regime based on multiple factors
+        bullish_score = 0
+        bearish_score = 0
+        
+        # Trend analysis
+        if current_price > sma_10 > sma_20:
+            bullish_score += 2
+        elif current_price < sma_10 < sma_20:
+            bearish_score += 2
+        
+        # Momentum analysis
+        if price_change_5 > 0.002:  # 0.2% positive momentum
+            bullish_score += 1
+        elif price_change_5 < -0.002:  # 0.2% negative momentum
+            bearish_score += 1
+            
+        if price_change_10 > 0.005:  # 0.5% positive momentum
+            bullish_score += 1
+        elif price_change_10 < -0.005:  # 0.5% negative momentum
+            bearish_score += 1
+        
+        # RSI analysis
+        if rsi > 60:
+            bullish_score += 1
+        elif rsi < 40:
+            bearish_score += 1
+        
+        # Volatility analysis (high volatility can indicate regime change)
+        if volatility_ratio > 1.5:
+            # High volatility - could be either direction
+            if bullish_score > bearish_score:
+                bullish_score += 0.5
+            else:
+                bearish_score += 0.5
+        
+        # Determine state and probabilities
+        total_score = bullish_score + bearish_score
+        if total_score == 0:
+            # Neutral market
+            state = 1
+            probs = [0.25, 0.50, 0.25]  # Neutral bias
+        elif bullish_score > bearish_score:
+            # Bullish market
+            state = 2
+            bullish_prob = min(0.8, 0.4 + (bullish_score / 10))
+            bearish_prob = max(0.1, 0.3 - (bullish_score / 15))
+            neutral_prob = 1.0 - bullish_prob - bearish_prob
+            probs = [bearish_prob, neutral_prob, bullish_prob]
+        else:
+            # Bearish market
+            state = 0
+            bearish_prob = min(0.8, 0.4 + (bearish_score / 10))
+            bullish_prob = max(0.1, 0.3 - (bearish_score / 15))
+            neutral_prob = 1.0 - bearish_prob - bullish_prob
+            probs = [bearish_prob, neutral_prob, bullish_prob]
+        
+        # Debug output
+        state_names = ['BEARISH', 'NEUTRAL', 'BULLISH']
+        print(f"🎯 Market Regime: {state_names[state]} | Scores: Bull={bullish_score:.1f}, Bear={bearish_score:.1f}")
+        print(f"   RSI: {rsi:.1f} | SMA10: {sma_10:.2f} | SMA20: {sma_20:.2f} | Price: {current_price:.2f}")
+        print(f"   Momentum 5-bar: {price_change_5*100:.2f}% | 10-bar: {price_change_10*100:.2f}%")
+        
+        return state, probs
+    
     def generate_hmm_trade_signal(self):
         """Generate trading signal using real HMM strategy"""
         if len(self.positions) >= 3:  # Max 3 positions
@@ -711,86 +864,15 @@ class EnhancedTradingGUI:
             if signal and signal.get('signal', 0) != 0:
                 self.execute_hmm_trade(signal)
             else:
-                # No signal generated, occasionally use simplified logic
-                if np.random.random() < 0.1:  # 10% chance
-                    self.generate_simplified_signal_from_ohlc()
+                # No signal generated, use simplified logic as fallback
+                self.generate_simplified_signal_from_ohlc()
                 
         except Exception as e:
             print(f"❌ Error generating HMM signal: {e}")
-            # Fallback to simplified signal occasionally
-            if np.random.random() < 0.1:  # 10% chance
-                self.generate_simplified_signal_from_ohlc()
+            # Fallback to simplified signal
+            self.generate_simplified_signal_from_ohlc()
     
-    def generate_simple_test_trade(self):
-        """Generate a simple test trade for demonstration"""
-        if len(self.positions) >= 2:  # Max 2 positions for testing
-            return
-        
-        direction = np.random.choice([1, -1])
-        entry_price = self.current_price
-        
-        # Calculate stop loss based on last 10 candles (including signal candle)
-        if len(self.ohlc_data) >= 10:
-            last_10_candles = list(self.ohlc_data)[-10:]  # Last 10 candles including current
-            
-            if direction == 1:  # Buy trade
-                # SL = Low of last 10 candles
-                stop_loss = min(candle['low'] for candle in last_10_candles)
-            else:  # Sell trade
-                # SL = High of last 10 candles
-                stop_loss = max(candle['high'] for candle in last_10_candles)
-        else:
-            # Fallback if not enough candles - use percentage-based SL
-            timeframe_str = self.timeframe_var.get()
-            if timeframe_str == "M1":
-                stop_loss_distance = entry_price * 0.001
-            elif timeframe_str == "M5":
-                stop_loss_distance = entry_price * 0.002
-            elif timeframe_str == "M15":
-                stop_loss_distance = entry_price * 0.003
-            elif timeframe_str == "M30":
-                stop_loss_distance = entry_price * 0.004
-            else:  # H1
-                stop_loss_distance = entry_price * 0.005
-            
-            if direction == 1:
-                stop_loss = entry_price - stop_loss_distance
-            else:
-                stop_loss = entry_price + stop_loss_distance
-        
-        # Calculate stop loss distance for TP calculation
-        stop_loss_distance = abs(entry_price - stop_loss)
-        
-        # Calculate take profit with 1:1.5 risk-reward ratio
-        if direction == 1:  # Buy
-            take_profit = entry_price + stop_loss_distance * 1.5  # 1:1.5 RR
-        else:  # Sell
-            take_profit = entry_price - stop_loss_distance * 1.5
-        
-        # Calculate position size
-        risk_amount = self.capital * (self.risk_per_trade / 100)
-        lot_size = self.calculate_lot_size(risk_amount, stop_loss_distance, entry_price)
-        
-        position = {
-            'id': len(self.trades_history) + 1,
-            'direction': direction,
-            'entry_price': entry_price,
-            'entry_time': datetime.now(),
-            'stop_loss': stop_loss,
-            'take_profit': take_profit,
-            'lot_size': lot_size,
-            'risk_amount': risk_amount,
-            'status': 'open'
-        }
-        
-        self.positions.append(position)
-        self.play_sound('trade_open')
-        self.add_particle_effect(entry_price, direction)
-        
-        timeframe_str = self.timeframe_var.get()
-        print(f"🧪 Trade ({timeframe_str}): {'BUY' if direction == 1 else 'SELL'} at {entry_price:.2f}")
-        print(f"   SL: {stop_loss:.2f} (10-candle {'low' if direction == 1 else 'high'}) | TP: {take_profit:.2f} | Distance: {stop_loss_distance:.2f}")
-        print(f"   Lot: {lot_size} | Risk: ${risk_amount:.2f} | RR: 1:1.5 | Total positions: {len(self.positions)}")
+
 
     def generate_simplified_signal_from_ohlc(self):
         """Generate simplified trading signal from OHLC data"""
@@ -820,13 +902,15 @@ class EnhancedTradingGUI:
         else:
             rsi = 50  # Neutral
         
-        # Generate signal based on conditions - increased probability for more trades
-        if current_price > sma_20 and 30 < rsi < 70 and np.random.random() < 0.15:  # 15% chance
-            # Buy signal
-            self.execute_simple_trade(1, current_price)
-        elif current_price < sma_20 and 30 < rsi < 70 and np.random.random() < 0.15:  # 15% chance
-            # Sell signal
-            self.execute_simple_trade(-1, current_price)
+        # Generate signal based on conditions - more deterministic approach
+        if current_price > sma_20 and 30 < rsi < 70:
+            # Buy signal - only if RSI shows momentum
+            if rsi < 60:  # Not overbought
+                self.execute_simple_trade(1, current_price)
+        elif current_price < sma_20 and 30 < rsi < 70:
+            # Sell signal - only if RSI shows momentum
+            if rsi > 40:  # Not oversold
+                self.execute_simple_trade(-1, current_price)
     
     def generate_simplified_signal(self, df):
         """Generate simplified trading signal based on price action (legacy method)"""
@@ -838,13 +922,15 @@ class EnhancedTradingGUI:
         sma_20 = df['Close'].rolling(20).mean().iloc[-1]
         rsi = self.calculate_rsi(df['Close'], 14)
         
-        # Generate signal based on conditions
-        if current_price > sma_20 and rsi < 70 and np.random.random() < 0.03:
-            # Buy signal
-            self.execute_simple_trade(1, current_price)
-        elif current_price < sma_20 and rsi > 30 and np.random.random() < 0.03:
-            # Sell signal
-            self.execute_simple_trade(-1, current_price)
+        # Generate signal based on conditions - more deterministic
+        if current_price > sma_20 and rsi < 70:
+            # Buy signal - only when conditions are clear
+            if rsi > 50:  # Momentum confirmation
+                self.execute_simple_trade(1, current_price)
+        elif current_price < sma_20 and rsi > 30:
+            # Sell signal - only when conditions are clear
+            if rsi < 50:  # Momentum confirmation
+                self.execute_simple_trade(-1, current_price)
     
     def calculate_rsi(self, prices, period=14):
         """Calculate RSI indicator"""
@@ -900,6 +986,9 @@ class EnhancedTradingGUI:
         stop_loss_distance = abs(entry_price - stop_loss)
         lot_size = self.calculate_lot_size(risk_amount, stop_loss_distance, entry_price)
         
+        # Verify risk calculation
+        actual_risk = self.verify_risk_calculation(entry_price, stop_loss, lot_size, risk_amount)
+        
         position = {
             'id': len(self.trades_history) + 1,
             'direction': direction,
@@ -909,6 +998,7 @@ class EnhancedTradingGUI:
             'take_profit': take_profit,
             'lot_size': lot_size,
             'risk_amount': risk_amount,  # Store original risk amount
+            'actual_risk': actual_risk,  # Store actual calculated risk
             'status': 'open'
         }
         
@@ -918,8 +1008,9 @@ class EnhancedTradingGUI:
         
         timeframe_str = self.timeframe_var.get()
         print(f"🎯 Trade ({timeframe_str}): {'BUY' if direction == 1 else 'SELL'} at {entry_price:.2f}")
-        print(f"   SL: {stop_loss:.2f} (10-candle {'low' if direction == 1 else 'high'}) | TP: {take_profit:.2f} | Distance: {stop_loss_distance:.2f}")
-        print(f"   Risk: ${risk_amount:.2f} | Lot: {lot_size} | RR: 1:1.5 | Total positions: {len(self.positions)}")
+        print(f"   SL: {stop_loss:.2f} (10-candle {'low' if direction == 1 else 'high'}) | TP: {take_profit:.2f}")
+        print(f"   Risk: {self.risk_per_trade}% (${risk_amount:.2f}) | Lot: {lot_size:.4f} | RR: 1:1.5")
+        print(f"   Total positions: {len(self.positions)}")
     
     def execute_hmm_trade(self, signal):
         """Execute trade from real HMM strategy signal"""
@@ -961,6 +1052,9 @@ class EnhancedTradingGUI:
         stop_loss_distance = abs(entry_price - stop_loss)
         lot_size = self.calculate_lot_size(risk_amount, stop_loss_distance, entry_price)
         
+        # Verify risk calculation
+        actual_risk = self.verify_risk_calculation(entry_price, stop_loss, lot_size, risk_amount)
+        
         position = {
             'id': len(self.trades_history) + 1,
             'direction': direction,
@@ -970,6 +1064,7 @@ class EnhancedTradingGUI:
             'take_profit': take_profit,
             'lot_size': lot_size,
             'risk_amount': risk_amount,  # Store original risk amount
+            'actual_risk': actual_risk,  # Store actual calculated risk
             'status': 'open'
         }
         
@@ -977,9 +1072,9 @@ class EnhancedTradingGUI:
         self.play_sound('trade_open')
         self.add_particle_effect(entry_price, direction)
         
-        print(f"🧠 HMM Strategy Trade: {'BUY' if direction == 1 else 'SELL'} at {entry_price:.5f}")
-        print(f"   SL: {stop_loss:.5f} (10-candle {'low' if direction == 1 else 'high'}) | TP: {take_profit:.5f} | RR: 1:1.5")
-        print(f"   Risk: ${risk_amount:.2f} | Lot: {lot_size} | Distance: {stop_loss_distance:.5f}")
+        print(f"🧠 HMM Strategy Trade: {'BUY' if direction == 1 else 'SELL'} at {entry_price:.2f}")
+        print(f"   SL: {stop_loss:.2f} (10-candle {'low' if direction == 1 else 'high'}) | TP: {take_profit:.2f}")
+        print(f"   Risk: {self.risk_per_trade}% (${risk_amount:.2f}) | Lot: {lot_size:.4f} | RR: 1:1.5")
     
     def generate_trade_signal(self):
         """Generate a trading signal using strategy logic"""
@@ -1562,10 +1657,10 @@ class EnhancedTradingGUI:
                     # Set current price to the latest bar
                     self.current_price = row['Close']
                     
-                    # Simulate HMM state
-                    state = np.random.randint(0, 3)
+                    # Get real HMM state from strategy
+                    state, state_probs = self.get_real_hmm_state()
                     self.hmm_states.append(state)
-                    self.state_probabilities.append([np.random.random(), np.random.random(), np.random.random()])
+                    self.state_probabilities.append(state_probs)
                 
                 # Start simulation from bar 100
                 self.current_bar_index = initial_bars
@@ -1716,61 +1811,102 @@ class EnhancedTradingGUI:
         return self.contract_specs.get(symbol, self.contract_specs["DEFAULT"])
     
     def calculate_lot_size(self, risk_amount, stop_loss_distance, entry_price):
-        """Calculate reasonable lot size based on risk amount and stop loss distance"""
+        """Calculate proper lot size based on risk amount and stop loss distance"""
         if stop_loss_distance <= 0:
             return 0.01  # Minimum lot size
         
-        # Use a simple, consistent formula for all symbols
-        # Lot size = Risk Amount / Stop Loss Distance
-        # This ensures the maximum loss equals the risk amount
-        lot_size = risk_amount / stop_loss_distance
+        # PROPER RISK MANAGEMENT FORMULA:
+        # Position Size = Risk Amount / Stop Loss Distance
+        # This ensures that if SL is hit, loss = exactly the risk amount
         
-        # Apply reasonable scaling based on symbol type
+        position_size = risk_amount / stop_loss_distance
+        
+        # Convert position size to lot size based on symbol type
         if self.trading_symbol in ['BTCUSD', 'BTCUSDm']:
-            # For Bitcoin: scale down significantly due to high price
-            lot_size = lot_size / 10000  # Much smaller lots for BTC
+            # For Bitcoin: 1 lot = 1 BTC, so position size IS the lot size
+            lot_size = position_size
         elif self.trading_symbol in ['ETHUSD', 'ETHUSDm']:
-            # For Ethereum: moderate scaling
-            lot_size = lot_size / 1000
+            # For Ethereum: 1 lot = 1 ETH, so position size IS the lot size  
+            lot_size = position_size
         elif self.trading_symbol in ['XAUUSDm']:
-            # For Gold: light scaling
-            lot_size = lot_size / 100
+            # For Gold: 1 lot = 100 oz, so divide by 100
+            lot_size = position_size / 100
         else:
-            # For forex: minimal scaling
-            lot_size = lot_size / 10
+            # For forex: 1 lot = 100,000 units, so divide by 100,000
+            lot_size = position_size / 100000
         
-        # Ensure reasonable lot size range
-        lot_size = max(0.001, min(0.1, lot_size))  # Cap at 0.1 lots max
+        # Ensure reasonable lot size range (but don't cap too aggressively)
+        lot_size = max(0.001, min(10.0, lot_size))  # Allow up to 10 lots
         
-        # Round to 3 decimal places for lot size
-        lot_size = round(lot_size, 3)
+        # Round to appropriate decimal places
+        lot_size = round(lot_size, 4)
+        
+        # Debug output to verify calculations
+        print(f"💰 Risk Calculation:")
+        print(f"   Risk Amount: ${risk_amount:.2f}")
+        print(f"   SL Distance: {stop_loss_distance:.2f}")
+        print(f"   Position Size: {position_size:.2f}")
+        print(f"   Lot Size: {lot_size:.4f}")
+        print(f"   Expected Loss if SL hit: ${stop_loss_distance * lot_size:.2f}")
         
         return lot_size
     
     def calculate_pnl(self, entry_price, exit_price, lot_size, direction):
-        """Calculate P&L using consistent and realistic calculation"""
-        # Simple P&L calculation: (Exit Price - Entry Price) * Direction * Lot Size
+        """Calculate P&L using proper formula that matches lot size calculation"""
+        # Price difference in the direction of the trade
         price_diff = (exit_price - entry_price) * direction
         
-        # Use consistent scaling that matches lot size calculation
+        # PROPER P&L CALCULATION:
+        # P&L = Price Difference * Lot Size * Contract Size
+        
         if self.trading_symbol in ['BTCUSD', 'BTCUSDm']:
-            # For Bitcoin: use the same scaling as lot size calculation
-            pnl = price_diff * lot_size * 10000  # Reverse the lot size scaling
+            # For Bitcoin: 1 lot = 1 BTC, P&L = price_diff * lot_size
+            pnl = price_diff * lot_size
         elif self.trading_symbol in ['ETHUSD', 'ETHUSDm']:
-            # For Ethereum: reverse the scaling
-            pnl = price_diff * lot_size * 1000
+            # For Ethereum: 1 lot = 1 ETH, P&L = price_diff * lot_size
+            pnl = price_diff * lot_size
         elif self.trading_symbol in ['XAUUSDm']:
-            # For Gold: reverse the scaling
+            # For Gold: 1 lot = 100 oz, P&L = price_diff * lot_size * 100
             pnl = price_diff * lot_size * 100
         else:
-            # For forex: reverse the scaling
-            pnl = price_diff * lot_size * 10
+            # For forex: 1 lot = 100,000 units, P&L = price_diff * lot_size * 100,000
+            pnl = price_diff * lot_size * 100000
         
-        # Cap P&L to prevent unrealistic numbers (max 20% of capital per trade)
-        max_pnl = self.capital * 0.2
-        pnl = max(-max_pnl, min(max_pnl, pnl))
+        # Debug output to verify P&L calculation
+        print(f"📊 P&L Calculation:")
+        print(f"   Entry: {entry_price:.2f} | Exit: {exit_price:.2f}")
+        print(f"   Price Diff: {price_diff:.2f} | Lot Size: {lot_size:.4f}")
+        print(f"   P&L: ${pnl:.2f}")
         
         return pnl
+    
+    def verify_risk_calculation(self, entry_price, stop_loss, lot_size, risk_amount):
+        """Verify that the risk calculation is correct"""
+        stop_loss_distance = abs(entry_price - stop_loss)
+        
+        # Calculate what the actual loss would be if SL is hit
+        if self.trading_symbol in ['BTCUSD', 'BTCUSDm']:
+            actual_loss = stop_loss_distance * lot_size
+        elif self.trading_symbol in ['ETHUSD', 'ETHUSDm']:
+            actual_loss = stop_loss_distance * lot_size
+        elif self.trading_symbol in ['XAUUSDm']:
+            actual_loss = stop_loss_distance * lot_size * 100
+        else:
+            actual_loss = stop_loss_distance * lot_size * 100000
+        
+        risk_accuracy = (actual_loss / risk_amount) * 100
+        
+        print(f"🔍 Risk Verification:")
+        print(f"   Target Risk: ${risk_amount:.2f}")
+        print(f"   Actual Risk: ${actual_loss:.2f}")
+        print(f"   Accuracy: {risk_accuracy:.1f}%")
+        
+        if abs(risk_accuracy - 100) > 5:  # More than 5% off
+            print(f"⚠️ WARNING: Risk calculation is {risk_accuracy:.1f}% of target!")
+        else:
+            print(f"✅ Risk calculation is accurate!")
+        
+        return actual_loss
     
     def price_to_pips(self, price_distance):
         """Convert price distance to pips"""
